@@ -34,10 +34,12 @@
 #include <errno.h>
 #include <unistd.h>
 #include <stdlib.h>
+#include <signal.h>
 
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <sys/inotify.h>
 
 #include <glib.h>
 
@@ -51,6 +53,8 @@
 #include "serial.h"
 #include "msg.h"
 #include "manager.h"
+
+#define BUF_LEN (100*sizeof(struct inotify_event))
 
 /*
  * Device session storing the connected

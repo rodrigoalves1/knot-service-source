@@ -33,9 +33,12 @@
 #include <string.h>
 
 #include <glib.h>
+#include <sys/inotify.h>
 
 #include "log.h"
 #include "manager.h"
+
+#define BUF_LEN (sizeof(struct inotify_event))
 
 static GMainLoop *main_loop;
 
@@ -65,11 +68,42 @@ static GOptionEntry options[] = {
 	{ NULL },
 };
 
+static gboolean inotify_cb(GIOChannel *gio, GIOCondition condition,
+								gpointer data)
+{
+	int inotifyFD = g_io_channel_unix_get_fd(gio);
+	char buf[BUF_LEN];
+	ssize_t numRead;
+	const struct inotify_event *event;
+
+	numRead = read(inotifyFD, buf, BUF_LEN);
+	if (numRead == -1) {
+		LOG_ERROR("Error read from inotify fd\n");
+		return FALSE;
+	}
+
+	LOG_INFO("Read %ld bytes from inotify fd\n", (long) numRead);
+
+	/* Process the events in buffer returned by read() */
+
+	event = (struct inotify_event *) buf;
+	if (event->mask & IN_MODIFY)
+		g_main_loop_quit(main_loop);
+
+	return TRUE;
+}
+
 int main(int argc, char *argv[])
 {
 	GOptionContext *context;
 	GError *gerr = NULL;
 	int err;
+	GIOChannel *inotify_io;
+	int inotifyFD, wd;
+	guint watch_id;
+
+	/* starting inotify */
+	inotifyFD = inotify_init();
 
 	LOG_INFO("KNOT Gateway\n");
 
@@ -90,6 +124,18 @@ int main(int argc, char *argv[])
 		return EXIT_FAILURE;
 	}
 
+	wd = inotify_add_watch(inotifyFD, opt_cfg, IN_MODIFY);
+	if (wd == -1) {
+		close(inotifyFD);
+		LOG_ERROR("Error creating watch over: %s\n", opt_cfg);
+		return -ENOENT;
+	}
+
+	/*Setting gio channel to watch inotify fd*/
+	inotify_io = g_io_channel_unix_new(inotifyFD);
+	watch_id = g_io_add_watch(inotify_io, G_IO_IN, inotify_cb, NULL);
+	g_io_channel_set_close_on_unref(inotify_io, TRUE);
+
 	err = manager_start(opt_cfg, opt_host, opt_port, opt_proto, opt_tty);
 	if (err < 0) {
 		LOG_ERROR("start(): %s (%d)\n", strerror(-err), -err);
@@ -109,6 +155,13 @@ int main(int argc, char *argv[])
 	g_main_loop_run(main_loop);
 
 	g_main_loop_unref(main_loop);
+
+	g_source_remove(watch_id);
+	g_io_channel_unref(inotify_io);
+	 /*removing from the watch list.*/
+	inotify_rm_watch(inotifyFD, wd);
+	/*closing the INOTIFY instance*/
+	close(inotifyFD);
 
 	manager_stop();
 
