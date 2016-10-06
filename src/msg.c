@@ -125,19 +125,35 @@ static void parse_json_value_types(json_object *jobj, knot_value_types *limit)
 static int parse_device_info(const char *json_str,
 					char **puuid, char **ptoken)
 {
-	json_object *jobj, *json_uuid, *json_token;
+	json_object *jobj, *jobjentry, *json_uuid, *json_token;
 	const char *uuid, *token;
 	int err = -EINVAL;
 
 	jobj = json_tokener_parse(json_str);
 	if (jobj == NULL)
-		return -EINVAL;
+		goto done;
+	/*
+	 * If JSON is an array it means we are using websockets, then the
+	 * expected JSON format is:
+	 * ["registered", {"uuid":"VALUE",...,"token":"VALUE"}]
+	 */
+	if (json_object_get_type(jobj) == json_type_array) {
+		jobjentry = json_object_array_get_idx(jobj, 1);
+		if (jobjentry == NULL)
+			goto done;
 
-	if (!json_object_object_get_ex(jobj, "uuid", &json_uuid))
+	if (!json_object_object_get_ex(jobjentry, "uuid", &json_uuid))
 		goto done;
 
-	if (!json_object_object_get_ex(jobj, "token", &json_token))
+	if (!json_object_object_get_ex(jobjentry, "token", &json_token))
 		goto done;
+	} else {
+		if (!json_object_object_get_ex(jobj, "uuid", &json_uuid))
+			goto done;
+
+		if (!json_object_object_get_ex(jobj, "token", &json_token))
+			goto done;
+	}
 
 	uuid = json_object_get_string(json_uuid);
 	token = json_object_get_string(json_token);
