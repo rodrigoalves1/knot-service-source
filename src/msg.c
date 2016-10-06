@@ -411,6 +411,7 @@ static int8_t msg_register(const credential_t *owner,
 	json_raw_t json;
 	int err;
 	int8_t result;
+	json_object *jarray;
 
 	if (kreq->devName[0] == '\0') {
 		LOG_ERROR("Empty device name!\n");
@@ -418,7 +419,9 @@ static int8_t msg_register(const credential_t *owner,
 	}
 
 	jobj = json_object_new_object();
-	if (!jobj) {
+	jarray = json_object_new_array();
+
+	if (!jobj || !jarray) {
 		LOG_ERROR("JSON: no memory\n");
 		return KNOT_ERROR_UNKNOWN;
 	}
@@ -432,10 +435,19 @@ static int8_t msg_register(const credential_t *owner,
 
 	jobjstring = json_object_to_json_string(jobj);
 
+	if (!strcmp(proto_ops->name, "ws")) {
+		json_object_array_add(jarray,
+					json_object_new_string("register"));
+		json_object_array_add(jarray, jobj);
+		jobjstring = json_object_to_json_string(jarray);
+	}
+
 	memset(&json, 0, sizeof(json));
 	err = proto_ops->mknode(proto_sock, jobjstring, &json);
 
-	json_object_put(jobj);
+	if (strcmp(proto_ops->name, "ws"))
+		json_object_put(jobj);
+	json_object_put(jarray);
 
 	if (err < 0) {
 		LOG_ERROR("manager mknode: %s(%d)\n", strerror(-err), -err);
