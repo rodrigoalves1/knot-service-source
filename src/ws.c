@@ -34,17 +34,55 @@
 
 #include <glib.h>
 
+#include <json-c/json.h>
+
 #include "log.h"
 #include "proto.h"
 
 struct lws_context *context;
 static GHashTable *wstable;
+gboolean got_response = FALSE;
+gboolean connection_error = FALSE;
+static struct lws *ws;
+
+
+struct per_session_data_ws {
+	struct lws *ws;
+	unsigned char buffer[LWS_PRE + 4096];
+	unsigned int len;
+	json_raw_t *json;
+};
+
+struct per_session_data_ws *psd;
 
 static gboolean timeout_ws(gpointer user_data)
 {
 	lws_service(context, 0);
 
 	return TRUE;
+}
+
+static int ret2errno(const char *json_str, char *expected_result)
+{
+	json_object *jobj, *jobjentry;
+	int err = -EIO;
+
+	jobj = json_tokener_parse(json_str);
+	if (jobj == NULL)
+		goto done;
+
+	if (json_object_get_type(jobj) == json_type_array) {
+		jobjentry = json_object_array_get_idx(jobj, 0);
+		if (jobjentry == NULL)
+			goto done;
+	}
+	if (!strcmp(json_object_get_string(jobjentry), expected_result))
+		err = 1;
+
+done:
+	json_object_put(jobj);
+
+	return err;
 }
 
 static const char *lws_reason2str(enum lws_callback_reasons reason)
@@ -106,14 +144,14 @@ static const char *lws_reason2str(enum lws_callback_reasons reason)
 		return "PROTOCOL_INIT";
 	case LWS_CALLBACK_PROTOCOL_DESTROY:
 		return "PROTOCOL_DESTROY";
-	case LWS_CALLBACK_WSI_CREATE: /* always protocol[0] */
+	case LWS_CALLBACK_WSI_CREATE:
 		return "WSI_CREATE";
-	case LWS_CALLBACK_WSI_DESTROY: /* always protocol[0] */
+	case LWS_CALLBACK_WSI_DESTROY:
 		return "WSI_DESTROY";
 	case LWS_CALLBACK_GET_THREAD_ID:
 		return "GET_THREAD_ID";
 
-	/* external poll() management support */
+
 	case LWS_CALLBACK_ADD_POLL_FD:
 		return "ADD_POLL_FD";
 	case LWS_CALLBACK_DEL_POLL_FD:
@@ -127,7 +165,7 @@ static const char *lws_reason2str(enum lws_callback_reasons reason)
 
 	case LWS_CALLBACK_OPENSSL_CONTEXT_REQUIRES_PRIVATE_KEY:
 		return "OPENSSL_CONTEXT_REQUIRES_PRIVATE_KEY";
-	case LWS_CALLBACK_USER: /* user code can use any including / above */
+	case LWS_CALLBACK_USER:
 		return "USER";
 
 
@@ -189,7 +227,39 @@ static void ws_close(int sock)
 static int ws_mknode(int sock, const char *owner_uuid,
 					json_raw_t *json)
 {
-	return -ENOSYS;
+	size_t realsize;
+	char *expected_result = "registered";
+
+	psd = g_new0(struct per_session_data_ws, 1);
+	psd->ws = g_hash_table_lookup(wstable, GINT_TO_POINTER(sock));
+
+	if (psd->ws == NULL)
+		LOG_ERROR("Not found\n");
+	else
+		psd->len = sprintf((char *)&psd->buffer[LWS_PRE], "%s",
+								owner_uuid);
+
+	/* Keep serving context until server responds or an error occurs */
+	while (!got_response || connection_error)
+		lws_service(context, 100);
+
+	realsize = strlen((char *) psd->json) + 1;
+
+	json->data = (char *) realloc(json->data, json->size + realsize + 1);
+	if (json->data == NULL) {
+		LOG_ERROR("Not enough memory\n");
+		return -1;
+	}
+
+	memcpy(json->data + json->size, psd->json, realsize);
+	json->size += realsize;
+	json->data[json->size] = 0;
+
+	got_response = FALSE;
+	connection_error = FALSE;
+
+	g_free(psd);
+	return ret2errno(json->data, expected_result);
 }
 
 static int ws_signin(int sock,const char *uuid, const char *token,
@@ -198,7 +268,6 @@ static int ws_signin(int sock,const char *uuid, const char *token,
 	return -ENOSYS;
 }
 
-
 static int callback_lws_http(struct lws *wsi,
 					enum lws_callback_reasons reason,
 					void *user, void *in, size_t len)
@@ -206,11 +275,113 @@ static int callback_lws_http(struct lws *wsi,
 {
 	LOG_INFO("reason(%02X): %s\n", reason, lws_reason2str(reason));
 
+	switch (reason) {
+	case LWS_CALLBACK_ESTABLISHED:
+		printf("LWS_CALLBACK_ESTABLISHED\n");
+		break;
+	case LWS_CALLBACK_CLIENT_CONNECTION_ERROR:
+		printf("LWS_CALLBACK_CLIENT_CONNECTION_ERROR\n");
+		connection_error = TRUE;
+		break;
+	case LWS_CALLBACK_CLIENT_FILTER_PRE_ESTABLISH:
+		break;
+	case LWS_CALLBACK_CLIENT_ESTABLISHED:
+		printf("LWS_CALLBACK_CLIENT_ESTABLISHED\n");
+		lws_callback_on_writable(wsi);
+		break;
+	case LWS_CALLBACK_CLOSED:
+		printf("LWS_CALLBACK_CLOSED\n");
+		connection_error = TRUE;
+		break;
+	case LWS_CALLBACK_CLOSED_HTTP:
+		break;
+	case LWS_CALLBACK_RECEIVE:
+		break;
+	case LWS_CALLBACK_CLIENT_RECEIVE:
+		{
+		((char *)in)[len] = '\0';
+		psd->json = (json_raw_t *) in;
+		got_response = TRUE;
+		printf("JSON RX %d '%s'\n", (int)len, (char *)psd->json);
+		/* Flow control will be enabled again when client writes data */
+		lws_rx_flow_control(wsi, 0);
+		}
+		break;
+	case LWS_CALLBACK_CLIENT_RECEIVE_PONG:
+		break;
+	case LWS_CALLBACK_CLIENT_WRITEABLE:
+		{
+		int l;
+
+		printf("Client wsi %p writable\n", wsi);
+
+		l = lws_write(psd->ws, &psd->buffer[LWS_PRE], psd->len,
+								LWS_WRITE_TEXT);
+		/* Enable RX when after message is successfully sent */
+		if (l < 0) {
+			connection_error = TRUE;
+			return -1;
+		}
+			lws_rx_flow_control(wsi, 1);
+		}
+		break;
+	case LWS_CALLBACK_SERVER_WRITEABLE:
+	case LWS_CALLBACK_HTTP:
+	case LWS_CALLBACK_HTTP_BODY:
+	case LWS_CALLBACK_HTTP_BODY_COMPLETION:
+	case LWS_CALLBACK_HTTP_FILE_COMPLETION:
+	case LWS_CALLBACK_HTTP_WRITEABLE:
+	case LWS_CALLBACK_FILTER_NETWORK_CONNECTION:
+	case LWS_CALLBACK_FILTER_HTTP_CONNECTION:
+	case LWS_CALLBACK_SERVER_NEW_CLIENT_INSTANTIATED:
+	case LWS_CALLBACK_FILTER_PROTOCOL_CONNECTION:
+	case LWS_CALLBACK_OPENSSL_LOAD_EXTRA_CLIENT_VERIFY_CERTS:
+	case LWS_CALLBACK_OPENSSL_LOAD_EXTRA_SERVER_VERIFY_CERTS:
+	case LWS_CALLBACK_OPENSSL_PERFORM_CLIENT_CERT_VERIFICATION:
+	case LWS_CALLBACK_CONFIRM_EXTENSION_OKAY:
+	case LWS_CALLBACK_CLIENT_CONFIRM_EXTENSION_SUPPORTED:
+	case LWS_CALLBACK_PROTOCOL_INIT:
+	case LWS_CALLBACK_PROTOCOL_DESTROY:
+	case LWS_CALLBACK_WSI_CREATE: // always protocol[0]
+	case LWS_CALLBACK_WSI_DESTROY: // always protocol[0]
+	case LWS_CALLBACK_GET_THREAD_ID:
+	case LWS_CALLBACK_ADD_POLL_FD:
+	case LWS_CALLBACK_DEL_POLL_FD:
+	case LWS_CALLBACK_CHANGE_MODE_POLL_FD:
+	case LWS_CALLBACK_LOCK_POLL:
+	case LWS_CALLBACK_UNLOCK_POLL:
+	case LWS_CALLBACK_OPENSSL_CONTEXT_REQUIRES_PRIVATE_KEY:
+	case LWS_CALLBACK_USER:
+	case LWS_CALLBACK_RECEIVE_PONG:
+	case LWS_CALLBACK_WS_PEER_INITIATED_CLOSE:
+	case LWS_CALLBACK_WS_EXT_DEFAULTS:
+	case LWS_CALLBACK_CGI:
+	case LWS_CALLBACK_CGI_TERMINATED:
+	case LWS_CALLBACK_CGI_STDIN_DATA:
+	case LWS_CALLBACK_CGI_STDIN_COMPLETED:
+	case LWS_CALLBACK_ESTABLISHED_CLIENT_HTTP:
+	case LWS_CALLBACK_CLOSED_CLIENT_HTTP:
+	case LWS_CALLBACK_RECEIVE_CLIENT_HTTP:
+	case LWS_CALLBACK_COMPLETED_CLIENT_HTTP:
+	case LWS_CALLBACK_RECEIVE_CLIENT_HTTP_READ:
+	case LWS_CALLBACK_CLIENT_APPEND_HANDSHAKE_HEADER:
+	case LWS_CALLBACK_HTTP_DROP_PROTOCOL:
+	case LWS_CALLBACK_CHECK_ACCESS_RIGHTS:
+	case LWS_CALLBACK_PROCESS_HTML:
+	case LWS_CALLBACK_ADD_HEADERS:
+	case LWS_CALLBACK_SESSION_INFO:
+	case LWS_CALLBACK_GS_EVENT:
+	case LWS_CALLBACK_HTTP_PMO:
+	case LWS_CALLBACK_CLIENT_HTTP_WRITEABLE:
+	case LWS_CALLBACK_HTTP_BIND_PROTOCOL:
+		break;
+	default:
+		break;
+	}
 	return 0;
 }
 
 static struct lws_protocols protocols[] = {
-
 	{
 		"http-only",
 		callback_lws_http,
@@ -223,7 +394,7 @@ static struct lws_protocols protocols[] = {
 
 static int ws_connect(void)
 {
-	struct lws *ws;
+
 	struct lws_client_connect_info info;
 	static char ads_port[300];
 
@@ -235,8 +406,7 @@ static int ws_connect(void)
 
 	memset(&info, 0, sizeof(info));
 
-	snprintf(ads_port, sizeof(ads_port), "%s:%u",
-		 address, port);
+	snprintf(ads_port, sizeof(ads_port), "%s:%u", address, port);
 
 	LOG_INFO("Connecting to %s...\n", ads_port);
 
@@ -245,11 +415,12 @@ static int ws_connect(void)
 	info.port = port;
 	info.ssl_connection = use_ssl;
 	info.path = "/ws/v2";
-	info.host = address;
+	info.host = info.address;
+	info.origin = info.address;
 	info.ietf_version_or_minus_one = -1;
+	info.protocol = protocols[0].name;
 
 	ws = lws_client_connect_via_info(&info);
-
 	if (ws == NULL) {
 		int err = errno;
 		LOG_ERROR("libwebsocket_client_connect(): %s(%d)\n",
@@ -266,6 +437,7 @@ static int ws_connect(void)
 
 	return sock;
 }
+
 
 static int ws_probe(const char *host, unsigned int port)
 {
