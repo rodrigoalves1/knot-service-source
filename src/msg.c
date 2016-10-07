@@ -180,23 +180,32 @@ static GSList *parse_device_schema(const char *json_str)
 	if (!jobj)
 		return NULL;
 
-	if (!json_object_object_get_ex(jobj, "devices", &jobjarray))
-		goto done;
-
-	if (json_object_get_type(jobjarray) != json_type_array ||
-				json_object_array_length(jobjarray) != 1)
+	if (json_object_object_get_ex(jobj, "devices", &jobjarray) &&
+			json_object_get_type(jobjarray) == json_type_array &&
+				json_object_array_length(jobjarray) == 1)
+		jobjentry = json_object_array_get_idx(jobjarray, 0);
+	else if (json_object_get_type(jobj) == json_type_array &&
+				json_object_array_length(jobj) == 2)
+		jobjentry = json_object_array_get_idx(jobj, 1);
+	else
 		goto done;
 
 	/* Getting first entry of 'devices' array :
-	 *
+	 * HTTP:
 	 * {"devices":[{"uuid": ...
+	 *		"schema" : [
+	 *			{"sensor_id": x, "value_type": w,
+	 *				"unit": z "type_id": y, "name": "foo"}]
+	 *		}]
+	 * WS:
+	 * ["devices",{"uuid": ...
 	 *		"schema" : [
 	 *			{"sensor_id": x, "value_type": w,
 	 *				"unit": z "type_id": y, "name": "foo"}]
 	 *		}]
 	 * }
 	 */
-	jobjentry = json_object_array_get_idx(jobjarray, 0);
+
 	if (!jobjentry)
 		goto done;
 

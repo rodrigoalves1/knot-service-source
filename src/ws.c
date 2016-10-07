@@ -254,7 +254,6 @@ static int ws_mknode(int sock, const char *owner_uuid,
 	memcpy(json->data + json->size, psd->json, realsize);
 	json->size += realsize;
 	json->data[json->size] = 0;
-
 	got_response = FALSE;
 	connection_error = FALSE;
 
@@ -265,7 +264,107 @@ static int ws_mknode(int sock, const char *owner_uuid,
 static int ws_signin(int sock,const char *uuid, const char *token,
 						json_raw_t *json)
 {
-	return -ENOSYS;
+	size_t realsize;
+	const char *jobjstring;
+	json_object *jobj;
+	json_object *jarray;
+	char *expected_result = "ready";
+
+	jobj = json_object_new_object();
+	jarray = json_object_new_array();
+
+	if (!jobj || !jarray) {
+		LOG_ERROR("JSON: no memory\n");
+		return -1;
+	}
+
+	json_object_object_add(jobj, "uuid",
+				json_object_new_string(uuid));
+	json_object_object_add(jobj, "token",
+				json_object_new_string(token));
+
+	json_object_array_add(jarray,
+	json_object_new_string("identity"));
+	json_object_array_add(jarray, jobj);
+
+	jobjstring = json_object_to_json_string(jarray);
+
+	printf("TX JSON %s\n", jobjstring);
+
+	psd = g_new0(struct per_session_data_ws, 1);
+	psd->ws = g_hash_table_lookup(wstable, GINT_TO_POINTER(sock));
+
+	if (psd->ws == NULL) {
+		LOG_ERROR("Not found\n");
+		return -1;
+	}
+
+	psd->len = sprintf((char *)&psd->buffer[LWS_PRE], "%s", jobjstring);
+
+	/* Keep serving context until server responds or an error occurs */
+	while (!got_response || connection_error)
+		lws_service(context, 100);
+
+	if (ret2errno((char *)psd->json, expected_result) < 0)
+		return -1;
+
+	got_response = FALSE;
+	connection_error = FALSE;
+
+	if (!jobj || !jarray) {
+		LOG_ERROR("JSON: no memory\n");
+		return -1;
+	}
+
+	/*
+	 * Unlike HTTP signin WS does not return the schema, so we need to
+	 * make another request to get it.
+	 */
+
+	/* Here we just replace the operation index 0 and the token */
+	json_object_array_put_idx (jarray, 0, json_object_new_string("device"));
+	json_object_object_del(json_object_array_get_idx(jarray,1), "token");
+
+	jobjstring = json_object_to_json_string(jarray);
+
+	g_free(psd);
+
+	psd = g_new0(struct per_session_data_ws, 1);
+	psd->ws = g_hash_table_lookup(wstable, GINT_TO_POINTER(sock));
+
+	if (psd->ws == NULL) {
+		LOG_ERROR("Not found\n");
+		return -1;
+	}
+
+	psd->len = sprintf((char *)&psd->buffer[LWS_PRE], "%s", jobjstring);
+	lws_callback_on_writable(psd->ws);
+	expected_result = "device";
+
+	while (!got_response || connection_error)
+		lws_service(context, 100);
+
+	realsize = strlen((char *) psd->json) + 1;
+
+	json->data = (char *) realloc(json->data, json->size + realsize + 1);
+	if (json->data == NULL) {
+		LOG_ERROR("Not enough memory\n");
+		return -1;
+	}
+
+	memcpy(json->data + json->size, psd->json, realsize);
+	json->size = realsize;
+	json->data[json->size] = 0;
+
+	g_free(psd);
+	json_object_put(jarray);
+
+	got_response = FALSE;
+	connection_error = FALSE;
+
+	return ret2errno(json->data, expected_result);
+
+
 }
 
 static int callback_lws_http(struct lws *wsi,
