@@ -269,7 +269,6 @@ static int ws_mknode(int sock, const char *owner_uuid,
 	 * The expected JSON format is:
 	 * ["registered", {"uuid":"VALUE",...,"token":"VALUE"}]
 	 */
-
 	if (!err) {
 		jres = json_tokener_parse(psd->json);
 		if (jres == NULL)
@@ -302,10 +301,129 @@ static int ws_mknode(int sock, const char *owner_uuid,
 	return err;
 }
 
-static int ws_signin(int sock,const char *uuid, const char *token,
-						json_raw_t *json)
+static int ws_signin(int sock, const char *uuid, const char *token,
+							json_raw_t *json)
 {
-	return -ENOSYS;
+	int err;
+	size_t realsize;
+	const char *jobjstring, *jobjstringres;
+	json_object *jobj, *jarray, *jres;
+	char *expected_result = "ready";
+
+	jobj = json_object_new_object();
+	jarray = json_object_new_array();
+
+	if (!jobj || !jarray) {
+		LOG_ERROR("JSON: no memory\n");
+		return -ENOMEM;
+	}
+
+	json_object_object_add(jobj, "uuid",
+				json_object_new_string(uuid));
+	json_object_object_add(jobj, "token",
+				json_object_new_string(token));
+
+	json_object_array_add(jarray,
+	json_object_new_string("identity"));
+	json_object_array_add(jarray, jobj);
+
+	jobjstring = json_object_to_json_string(jarray);
+
+	LOG_INFO("TX JSON %s\n", jobjstring);
+
+	psd = g_new0(struct per_session_data_ws, 1);
+	psd->ws = g_hash_table_lookup(wstable, GINT_TO_POINTER(sock));
+
+	if (psd->ws == NULL) {
+		LOG_ERROR("Not found\n");
+		return -1;
+	}
+
+	psd->len = sprintf((char *)&psd->buffer[LWS_PRE], "%s", jobjstring);
+
+	/* Keep serving context until server responds or an error occurs */
+	while (!got_response || connection_error)
+		lws_service(context, 100);
+
+	if (ret2errno((char *)psd->json, expected_result) < 0) {
+		json_object_put(jarray);
+		return -1;
+	}
+
+	got_response = FALSE;
+	connection_error = FALSE;
+
+	/*
+	 * Unlike HTTP signin WS does not return the schema, so we need to
+	 * make another request to get it.
+	 */
+
+	/* Here we just replace the operation index 0 and the token */
+	json_object_array_put_idx(jarray, 0, json_object_new_string("device"));
+	json_object_object_del(json_object_array_get_idx(jarray, 1), "token");
+
+	jobjstring = json_object_to_json_string(jarray);
+
+	g_free(psd);
+
+	psd = g_new0(struct per_session_data_ws, 1);
+	psd->ws = g_hash_table_lookup(wstable, GINT_TO_POINTER(sock));
+
+	if (psd->ws == NULL) {
+		LOG_ERROR("Not found\n");
+		return -1;
+	}
+
+
+	psd->len = sprintf((char *)&psd->buffer[LWS_PRE], "%s", jobjstring);
+	lws_callback_on_writable(psd->ws);
+	expected_result = "device";
+
+	while (!got_response || connection_error)
+		lws_service(context, 100);
+
+	err = ret2errno(psd->json, expected_result);
+	/*
+	 * The expected result:
+	 * ["devices",{"uuid": ...
+	 *		"schema" : [
+	 *			{"sensor_id": x, "value_type": w,
+	 *				"unit": z "type_id": y, "name": "foo"}]
+	 *		}]
+	 */
+	if (!err) {
+		jres = json_tokener_parse(psd->json);
+		if (jres == NULL)
+			return -EINVAL;
+
+		jobj = json_object_array_get_idx(jres, 1);
+		jobjstringres = json_object_to_json_string(jobj);
+
+
+		realsize = strlen((char *) jobjstringres) + 1;
+
+		json->data = (char *) realloc(json->data,
+						json->size + realsize + 1);
+		if (json->data == NULL) {
+			LOG_ERROR("Not enough memory\n");
+			return -1;
+		}
+
+		memcpy(json->data + json->size, jobjstringres, realsize);
+		json->size = realsize;
+		json->data[json->size] = 0;
+		json_object_put(jres);
+	}
+
+	g_free(psd);
+	json_object_put(jarray);
+
+	got_response = FALSE;
+	connection_error = FALSE;
+
+	return err;
+
+
 }
 
 static int callback_lws_http(struct lws *wsi,
