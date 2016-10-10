@@ -25,7 +25,14 @@
  * NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE,
  * EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
+struct settings {
+	char *host;
+	unsigned int port;
+	const char *proto;
+	char *uuid;
+	char *token;
+	const char *tty;
+};
 
-int manager_start(const char *file, const char *host, unsigned int port,
-					const char *proto, const char *tty);
+int manager_start(struct settings *settings);
 void manager_stop(void);
