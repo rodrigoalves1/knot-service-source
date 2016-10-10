@@ -426,6 +426,71 @@ static int ws_signin(int sock, const char *uuid, const char *token,
 
 }
 
+static int ws_rmnode(int sock, const char *uuid, const char *token,
+							json_raw_t *json)
+{
+	size_t realsize;
+	const char *jobjstring;
+	json_object *jobj;
+	json_object *jarray;
+	char *expected_result = "unregistered";
+
+	jobj = json_object_new_object();
+	jarray = json_object_new_array();
+
+	if (!jobj || !jarray) {
+		LOG_ERROR("JSON: no memory\n");
+		return -1;
+	}
+
+	json_object_object_add(jobj, "uuid", json_object_new_string(uuid));
+	json_object_object_add(jobj, "token", json_object_new_string(token));
+
+	jobjstring = json_object_to_json_string(jobj);
+
+	json_object_array_add(jarray,
+	json_object_new_string("unregister"));
+	json_object_array_add(jarray, jobj);
+
+	jobjstring = json_object_to_json_string(jarray);
+
+	LOG_INFO("TX JSON %s\n", jobjstring);
+
+	psd = g_new0(struct per_session_data_ws, 1);
+	psd->ws = g_hash_table_lookup(wstable, GINT_TO_POINTER(sock));
+
+	if (psd->ws == NULL)
+		LOG_ERROR("Not found\n");
+	else {
+		lws_callback_on_writable(psd->ws);
+		psd->len = sprintf((char *)&psd->buffer[LWS_PRE], "%s",
+								jobjstring);
+	}
+	/* Keep serving context until server responds or an error occurs */
+	while (!got_response || connection_error)
+		lws_service(context, 100);
+
+	realsize = strlen((char *) psd->json) + 1;
+
+	json->data = (char *) realloc(json->data, json->size + realsize + 1);
+	if (json->data == NULL) {
+		LOG_ERROR("Not enough memory\n");
+		return -1;
+	}
+
+	memcpy(json->data + json->size, psd->json, realsize);
+	json->size += realsize;
+	json->data[json->size] = 0;
+
+	g_free(psd);
+	json_object_put(jarray);
+
+	got_response = FALSE;
+	connection_error = FALSE;
+
+	return ret2errno(json->data, expected_result);
+}
+
 static int callback_lws_http(struct lws *wsi,
 					enum lws_callback_reasons reason,
 					void *user, void *in, size_t len)
@@ -471,10 +536,12 @@ static int callback_lws_http(struct lws *wsi,
 		{
 		int l;
 
-		LOG_INFO("Client wsi %p writable\n", wsi);
+		if (psd->ws == wsi)
+			LOG_INFO("Client wsi %p writable\n", wsi);
 
 		l = lws_write(psd->ws, &psd->buffer[LWS_PRE], psd->len,
 								LWS_WRITE_TEXT);
+		LOG_INFO("Wrote (%d) bytes\n", l);
 		/* Enable RX when after message is successfully sent */
 		if (l < 0) {
 			connection_error = TRUE;
@@ -625,6 +692,7 @@ struct proto_ops proto_ws = {
 	.name = "ws",	/* websockets */
 	.probe = ws_probe,
 	.remove = ws_remove,
+	.rmnode = ws_rmnode,
 	.connect = ws_connect,
 	.close = ws_close,
 	.mknode = ws_mknode,
