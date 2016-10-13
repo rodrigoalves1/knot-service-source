@@ -434,6 +434,45 @@ static int ws_rmnode(int sock, const char *uuid, const char *token,
 	return ret2errno(json->data, expected_result);
 }
 
+static int ws_schema(int sock, const char *uuid, const char *token,
+					const char *jreq, json_raw_t *json)
+{
+	size_t realsize;
+	char *expected_result = "updated";
+
+	psd = g_new0(struct per_session_data_ws, 1);
+	psd->ws = g_hash_table_lookup(wstable, GINT_TO_POINTER(sock));
+
+	if (psd->ws == NULL)
+		LOG_ERROR("Not found\n");
+	else {
+		lws_callback_on_writable(psd->ws);
+		psd->len = sprintf((char *)&psd->buffer[LWS_PRE], "%s",
+								jreq);
+	}
+
+	/* Keep serving context until server responds or an error occurs */
+	while (!got_response || connection_error)
+		lws_service(context, 100);
+
+	realsize = strlen((char *) psd->json) + 1;
+
+	json->data = (char *) realloc(json->data, json->size + realsize + 1);
+	if (json->data == NULL) {
+		LOG_ERROR("Not enough memory\n");
+		return -1;
+	}
+
+	memcpy(json->data + json->size, psd->json, realsize);
+	json->size += realsize;
+	json->data[json->size] = 0;
+	got_response = FALSE;
+	connection_error = FALSE;
+
+	g_free(psd);
+	return ret2errno(json->data, expected_result);
+}
+
 static int callback_lws_http(struct lws *wsi,
 					enum lws_callback_reasons reason,
 					void *user, void *in, size_t len)
@@ -639,4 +678,5 @@ struct proto_ops proto_ws = {
 	.close = ws_close,
 	.mknode = ws_mknode,
 	.signin = ws_signin,
+	.schema = ws_schema,
 };

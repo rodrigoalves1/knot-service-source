@@ -618,7 +618,7 @@ static int8_t msg_schema(int sock, int proto_sock,
 {
 	const knot_msg_schema *schema = kmsch;
 	knot_msg_schema *kschema;
-	struct json_object *jobj, *ajobj, *schemajobj;
+	struct json_object *jobj, *ajobj, *schemajobj, *jobjdev, *jarray, *jset;
 	struct trust *trust;
 	GSList *list;
 	json_raw_t json;
@@ -653,10 +653,22 @@ static int8_t msg_schema(int sock, int proto_sock,
 	ajobj = json_object_new_array();
 	schemajobj = json_object_new_object();
 
+	if (!strcmp(proto_ops->name, "ws")) {
+		jarray = json_object_new_array();
+		jobjdev = json_object_new_object();
+
+		json_object_object_add(jobjdev, "uuid",
+				json_object_new_string(trust->uuid));
+		json_object_object_add(jobjdev, "token",
+			json_object_new_string(trust->token));
+		json_object_array_add(ajobj, jobjdev);
+	}
+
 	/* Creating an array if the sensor supports multiple data types */
 	for (list = trust->schema_tmp; list; list = g_slist_next(list)) {
 		schema = list->data;
 		jobj = json_object_new_object();
+
 		json_object_object_add(jobj, "sensor_id",
 				json_object_new_int(schema->sensor_id));
 		json_object_object_add(jobj, "value_type",
@@ -668,11 +680,24 @@ static int8_t msg_schema(int sock, int proto_sock,
 		json_object_object_add(jobj, "name",
 				json_object_new_string(schema->values.name));
 
-		json_object_array_add(ajobj, jobj);
+		if (!strcmp(proto_ops->name, "ws")) {
+			jset = json_object_new_object();
+			json_object_object_add(jset, "$set", jobj);
+			json_object_array_add(ajobj, jset);
+		} else {
+			json_object_array_add(ajobj, jobj);
+		}
 	}
 
-	json_object_object_add(schemajobj, "schema", ajobj);
-	jobjstr = json_object_to_json_string(schemajobj);
+	if (!strcmp(proto_ops->name, "ws")) {
+		json_object_array_add(jarray, json_object_new_string("update"));
+		json_object_array_add(jarray, ajobj);
+		jobjstr = json_object_to_json_string(jarray);
+	} else {
+		json_object_object_add(schemajobj, "schema", ajobj);
+		jobjstr = json_object_to_json_string(schemajobj);
+	}
+
 
 	memset(&json, 0, sizeof(json));
 	err = proto_ops->schema(proto_sock, trust->uuid, trust->token,
@@ -680,6 +705,8 @@ static int8_t msg_schema(int sock, int proto_sock,
 	if (json.data)
 		free(json.data);
 
+	if (!strcmp(proto_ops->name, "ws"))
+		json_object_put(jarray);
 	json_object_put(schemajobj);
 
 	if (err < 0) {
