@@ -535,6 +535,43 @@ static int ws_schema(int sock, const char *uuid, const char *token,
 	return err;
 }
 
+static int ws_data(int sock, const char *uuid, const char *token,
+					const char *jreq, json_raw_t *json)
+{
+	struct json_object *jobj, *jmsg;
+	const char *jobjstr;
+
+	jobj = json_tokener_parse(jreq);
+	if (jobj == NULL)
+		return -EINVAL;
+
+	jmsg = json_object_new_array();
+	json_object_array_add(jmsg, json_object_new_string("data"));
+	json_object_object_add(jobj, "uuid", json_object_new_string(uuid));
+	json_object_object_add(jobj, "token", json_object_new_string(token));
+	json_object_array_add(jmsg, jobj);
+	jobjstr = json_object_to_json_string(jmsg);
+
+	psd = g_new0(struct per_session_data_ws, 1);
+	psd->ws = g_hash_table_lookup(wstable, GINT_TO_POINTER(sock));
+
+	if (psd->ws == NULL)
+		LOG_ERROR("Not found\n");
+	else {
+		lws_callback_on_writable(psd->ws);
+		psd->len = sprintf((char *)&psd->buffer[LWS_PRE], "%s",
+								jobjstr);
+	}
+	/* WS data does not expect any response */
+	got_response = FALSE;
+	connection_error = FALSE;
+
+	json_object_put(jmsg);
+
+	g_free(psd);
+	return 0;
+}
+
 static int callback_lws_http(struct lws *wsi,
 					enum lws_callback_reasons reason,
 					void *user, void *in, size_t len)
@@ -742,4 +779,5 @@ struct proto_ops proto_ws = {
 	.mknode = ws_mknode,
 	.signin = ws_signin,
 	.schema = ws_schema,
+	.data = ws_data,
 };
