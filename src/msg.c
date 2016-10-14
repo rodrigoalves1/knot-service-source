@@ -733,7 +733,7 @@ static int8_t msg_data(int sock, int proto_sock,
 	 * and a primitive KNOT type
 	 */
 	const knot_data *kdata = &(kmdata->payload);
-	struct json_object *jobj;
+	struct json_object *jobj, *jmsg;
 	const struct trust *trust;
 	const knot_msg_schema *schema;
 	GSList *list;
@@ -752,7 +752,6 @@ static int8_t msg_data(int sock, int proto_sock,
 	}
 
 	sensor_id = kmdata->sensor_id;
-
 
 	list = g_slist_find_custom(trust->schema, GUINT_TO_POINTER(sensor_id),
 								sensor_id_cmp);
@@ -781,7 +780,7 @@ static int8_t msg_data(int sock, int proto_sock,
 	switch (schema->values.value_type) {
 	case KNOT_VALUE_TYPE_INT:
 		json_object_object_add(jobj, "value",
-			       json_object_new_int(kdata->values.val_i.value));
+				json_object_new_int(kdata->values.val_i.value));
 		break;
 	case KNOT_VALUE_TYPE_FLOAT:
 
@@ -793,11 +792,11 @@ static int8_t msg_data(int sock, int proto_sock,
 			(kdata->values.val_f.value_dec / pow(10, len)));
 
 		json_object_object_add(jobj, "value",
-				       json_object_new_double(doubleval));
+					json_object_new_double(doubleval));
 		break;
 	case KNOT_VALUE_TYPE_BOOL:
 		json_object_object_add(jobj, "value",
-			       json_object_new_boolean(kdata->values.val_b));
+				json_object_new_boolean(kdata->values.val_b));
 		break;
 	case KNOT_VALUE_TYPE_RAW:
 		break;
@@ -807,6 +806,14 @@ static int8_t msg_data(int sock, int proto_sock,
 	}
 
 	jobjstr = json_object_to_json_string(jobj);
+
+	if (!strcmp(proto_ops->name, "ws")) {
+		jmsg = json_object_new_array();
+		json_object_array_add(jmsg, json_object_new_string("message"));
+		json_object_array_add(jmsg, jobj);
+		jobjstr = json_object_to_json_string(jmsg);
+	}
+
 	printf("JSON: %s\n", jobjstr);
 
 	memset(&json, 0, sizeof(json));
