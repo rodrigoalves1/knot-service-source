@@ -41,6 +41,8 @@
 
 #include <glib.h>
 
+#include <json-c/json.h>
+
 #include "log.h"
 #include "proto.h"
 
@@ -287,6 +289,10 @@ static int http_mknode(int sock, const char *jreq, json_raw_t *json)
 static int http_signin(int sock, const char *uuid, const char *token,
 							json_raw_t *json)
 {
+	size_t realsize;
+	int err;
+	json_object *jobj, *jobjarray, *jres;
+	const char *jobjstr;
 	/* Length: device_uri + '/' + UUID + '\0' */
 	char uri[strlen(device_uri) + 2 + MESHBLU_UUID_SIZE];
 
@@ -297,8 +303,37 @@ static int http_signin(int sock, const char *uuid, const char *token,
 	 * Return '0' if signin not fails or a negative value
 	 * mapped to generic Linux -errno codes.
 	 */
+	err = fetch_url(sock, uri, NULL, uuid, token, json, "GET");
+	if (!err) {
+		jobj = json_tokener_parse(json->data);
+		if (jobj == NULL)
+			return -EINVAL;
 
-	return fetch_url(sock, uri, NULL, uuid, token, json, "GET");
+		if (!json_object_object_get_ex(jobj, "devices", &jobjarray))
+			return -EINVAL;
+
+		if (json_object_get_type(jobjarray) != json_type_array ||
+				json_object_array_length(jobjarray) != 1)
+			return -EINVAL;
+
+		jres = json_object_array_get_idx(jobjarray, 0);
+		jobjstr = json_object_to_json_string(jres);
+
+		realsize = strlen(jobjstr) + 1;
+
+		json->data = (char *) realloc(json->data, realsize + 1);
+		if (json->data == NULL) {
+			LOG_ERROR("Not enough memory\n");
+			return -ENOMEM;
+		}
+
+		memcpy(json->data, jobjstr, realsize);
+		json->size = realsize;
+		json->data[json->size] = 0;
+		json_object_put(jobj);
+	}
+
+	return err;
 }
 
 static int http_rmnode(int sock, const char *uuid, const char *token,
