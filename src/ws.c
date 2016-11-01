@@ -48,6 +48,8 @@
 #define NOT_READY_RESPONSE_LEN	(sizeof(NOT_READY_RESPONSE) - 1)
 #define CLOUD_PATH		"/socket.io/?EIO=4&transport=websocket"
 #define DEFAULT_CLOUD_HOST	"localhost"
+#define DEVICE_INDEX		0
+#define OPERATION_PREFIX	420
 
 struct lws_context *context;
 static GHashTable *wstable;
@@ -116,7 +118,7 @@ static int ret2errno(const char *json_str, const char *expected_result)
 		goto done;
 
 	if (json_object_get_type(jobj) == json_type_array) {
-		jobjentry = json_object_array_get_idx(jobj, 0);
+		jobjentry = json_object_array_get_idx(jobj, DEVICE_INDEX);
 		if (jobjentry == NULL)
 			goto done;
 	}
@@ -138,7 +140,7 @@ static int handle_response(json_raw_t *json)
 	if (jres == NULL)
 		return -EINVAL;
 
-	jobj = json_object_array_get_idx(jres, 1);
+	jobj = json_object_array_get_idx(jres, DEVICE_INDEX);
 	jobjstringres = json_object_to_json_string(jobj);
 
 	realsize = strlen(jobjstringres) + 1;
@@ -321,15 +323,14 @@ static void ws_close(int sock)
 	if (!g_hash_table_remove(wstable, GINT_TO_POINTER(sock)))
 		log_error("Removing key: sock %d not found!", sock);
 }
-static int ws_mknode(int sock, const char *owner_uuid,
+static int ws_mknode(int sock, const char *device_json,
 					json_raw_t *json)
 {
 	int err;
 	json_object *jobj, *jarray;
 	const char *jobjstring;
-	const char *expected_result = "registered";
 
-	jobj = json_tokener_parse(owner_uuid);
+	jobj = json_tokener_parse(device_json);
 	if (jobj == NULL)
 		return -EINVAL;
 
@@ -346,29 +347,27 @@ static int ws_mknode(int sock, const char *owner_uuid,
 		log_error("Not found");
 		goto done;
 	}
-	psd->len = sprintf((char *)&psd->buffer[LWS_PRE], "%s", jobjstring);
+	psd->len = sprintf((char *) psd->buffer + LWS_PRE, "%d%s",
+					OPERATION_PREFIX, jobjstring);
 	lws_callback_on_writable(psd->ws);
 
 	/* Keep serving context until server responds or an error occurs */
-	while (!got_response || connection_error)
+	while (!got_response && !connection_error)
 		lws_service(context, SERVICE_TIMEOUT);
 
-	err = ret2errno(psd->json, expected_result);
-
-	/*
-	 * The expected JSON format is:
-	 * ["registered", {"uuid":"VALUE",...,"token":"VALUE"}]
-	 */
-	if (err < 0)
-		goto done;
+	if (connection_error)
+		err = -ECONNRESET;
 
 	err = handle_response(json);
 
+	if (err < 0)
+		goto done;
 done:
 	connection_error = FALSE;
 	got_response = FALSE;
 
 	json_object_put(jarray);
+	g_free(psd->json);
 	g_free(psd);
 
 	return err;
@@ -704,8 +703,13 @@ static void handle_cloud_response(const char *resp)
 		else if (!strncmp(resp, NOT_READY_RESPONSE,
 							NOT_READY_RESPONSE_LEN))
 			connection_error = TRUE;
-		else
-			break;
+		else {
+			if (psd->json)
+				g_free(psd->json);
+			psd->json = g_strdup(resp);
+			got_response = TRUE;
+		}
+		break;
 	default:
 		break;
 	}
@@ -716,7 +720,7 @@ static int callback_lws_http(struct lws *wsi,
 					void *user, void *in, size_t len)
 
 {
-	log_info("reason(%02X): %s", reason, lws_reason2str(reason));
+	log_info("reason(%02X): %s\n", reason, lws_reason2str(reason));
 
 	switch (reason) {
 	case LWS_CALLBACK_ESTABLISHED:
