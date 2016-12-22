@@ -201,15 +201,6 @@ int main(int argc, char *argv[])
 		LOG_ERROR("start(): %s (%d)\n", strerror(-err), -err);
 		goto failure;
 	}
-
-	/* Set user id to nobody */
-	err = setuid(65534);
-	if (err != 0) {
-		manager_stop();
-		LOG_ERROR("Set uid to nobody failed.  %s(%d). Exiting ...\n",
-							strerror(errno), errno);
-		goto failure;
-	}
 	/*
 	 * TODO: implement a robust & clean way to reload settings
 	 * instead of force quitting when configuration file changes.
@@ -223,6 +214,16 @@ int main(int argc, char *argv[])
 		manager_stop();
 		close(inotifyFD);
 		LOG_ERROR("inotify_add_watch(): %s\n", opt_cfg);
+		goto failure;
+	}
+
+	/* Set user id to nobody */
+	err = setuid(65534);
+	if (err != 0) {
+		manager_stop();
+		close(inotifyFD);
+		LOG_ERROR("Set uid to nobody failed.  %s(%d). Exiting ...\n",
+							strerror(errno), errno);
 		goto failure;
 	}
 	/* Setting gio channel to watch inotify fd */
