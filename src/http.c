@@ -547,7 +547,7 @@ unsigned int proto_register_watch(int proto_sock, const char *uuid,
 	fetch_data->proto_watch_cb = proto_watch_cb;
 	fetch_data->user_data = user_data;
 
-	gsource = g_timeout_add_seconds(10, proto_poll, fetch_data);
+	gsource = g_timeout_add_seconds(1, proto_poll, fetch_data);
 
 	proto_io = g_io_channel_unix_new(fetch_data->proto_sock);
 	g_io_add_watch(proto_io, G_IO_HUP | G_IO_NVAL | G_IO_ERR, http_hup_cb,
