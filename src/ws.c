@@ -44,8 +44,10 @@
 #define IDENTIFY_REQUEST	"[\"identify\"]"
 #define READY_RESPONSE		"[\"ready\""
 #define NOT_READY_RESPONSE	"[\"notReady\""
+#define CONFIG_MSG		"[\"config\",{"
 #define READY_RESPONSE_LEN	(sizeof(READY_RESPONSE) - 1)
 #define NOT_READY_RESPONSE_LEN	(sizeof(NOT_READY_RESPONSE) - 1)
+#define CONFIG_MSG_LEN		(sizeof(CONFIG_MSG) - 1)
 #define CLOUD_PATH		"/socket.io/?EIO=4&transport=websocket"
 #define DEFAULT_CLOUD_HOST	"localhost"
 #define DEVICE_INDEX		0
@@ -56,15 +58,24 @@ struct lws_context *context;
 static GHashTable *wstable;
 gboolean got_response = FALSE;
 gboolean connection_error = FALSE;
+gboolean client_connection_error = FALSE;
 gboolean connected = FALSE;
 static gboolean ready = FALSE;
 struct lws_client_connect_info info;
 static char *host_address = "localhost";
 static int host_port = 3000;
+static GSList *wsis = NULL;
+static gint conn_index = 0;
 
+/* Struct used to fetch data from cloud and send to THING */
+struct to_fetch {
+	int proto_sock;
+	void *user_data;
+	void (*watch_cb)(json_raw_t, void *);
+};
 
 struct per_session_data_ws {
-	struct lws *ws;
+	gint index;
 	/*
 	 * This buffer MUST have LWS_PRE bytes valid BEFORE the pointer. this
 	 * is defined in the lws documentation,
@@ -72,9 +83,9 @@ struct per_session_data_ws {
 	unsigned char buffer[LWS_PRE + MAX_PAYLOAD];
 	unsigned int len;
 	char *json;
+	struct to_fetch data;
+	struct timeval interval;
 };
-
-static struct per_session_data_ws *psd;
 
 /*
  * A received message has the following structure:
@@ -98,6 +109,7 @@ struct handshake_data {
 };
 
 static struct handshake_data *h_data;
+static struct per_session_data_ws *psd;
 
 static gboolean timeout_ws(gpointer user_data)
 {
@@ -174,6 +186,7 @@ static void parse_handshake_data(const char *json_str)
 
 	/* TODO: Send ping every h_data.pingInterval; */
 done:
+	g_free(h_data);
 	json_object_put(jobj);
 }
 
@@ -310,8 +323,30 @@ static const char *lws_reason2str(enum lws_callback_reasons reason)
 
 static void ws_close(int sock)
 {
-	if (!g_hash_table_remove(wstable, GINT_TO_POINTER(sock)))
-		log_error("Removing key: sock %d not found!", sock);
+	GSList *element;
+	struct lws *ws;
+
+	/*
+	 * When a thing disconnects the close callback is called. Then we
+	 * find its alloted resources at the 'wstable' and 'wsis' list
+	 * and free them.
+	 */
+	psd = g_hash_table_lookup(wstable, GINT_TO_POINTER(sock));
+
+	element = g_slist_nth(wsis, psd->index);
+	ws = element->data;
+	lws_callback_on_writable(ws);
+	lws_service(context, SERVICE_TIMEOUT);
+
+	if (g_slist_remove(wsis, &psd->index) == NULL)
+		log_error("Removing wsi: no wsi found for sock %d\n", sock);
+
+	if (!g_hash_table_remove(wstable, GINT_TO_POINTER(sock))) {
+		log_error("Removing key: sock not found!\n");
+		return;
+	}
+	g_free(psd->json);
+	g_free(psd);
 }
 static int ws_mknode(int sock, const char *device_json,
 					json_raw_t *json)
@@ -319,6 +354,7 @@ static int ws_mknode(int sock, const char *device_json,
 	int err;
 	json_object *jobj, *jarray;
 	const char *jobjstring;
+	GSList *element;
 
 	jobj = json_tokener_parse(device_json);
 	if (jobj == NULL)
@@ -329,17 +365,17 @@ static int ws_mknode(int sock, const char *device_json,
 	json_object_array_add(jarray, jobj);
 	jobjstring = json_object_to_json_string(jarray);
 
-	psd = g_new0(struct per_session_data_ws, 1);
-	psd->ws = g_hash_table_lookup(wstable, GINT_TO_POINTER(sock));
+	psd = g_hash_table_lookup(wstable, GINT_TO_POINTER(sock));
+	element = g_slist_nth(wsis, psd->index);
 
-	if (psd->ws == NULL) {
+	if (element->data == NULL) {
 		err = -EBADF;
 		log_error("Not found");
 		goto done;
 	}
 	psd->len = sprintf((char *) psd->buffer + LWS_PRE, "%d%s",
 					OPERATION_PREFIX, jobjstring);
-	lws_callback_on_writable(psd->ws);
+	lws_callback_on_writable(element->data);
 
 	/* Keep serving context until server responds or an error occurs */
 	while (!got_response && !connection_error)
@@ -357,8 +393,6 @@ done:
 	got_response = FALSE;
 
 	json_object_put(jarray);
-	g_free(psd->json);
-	g_free(psd);
 
 	return err;
 }
@@ -369,6 +403,7 @@ static int ws_device(int sock, const char *uuid,
 	int err;
 	const char *jobjstring;
 	json_object *jobj, *jarray;
+	GSList *element;
 
 	jobj = json_object_new_object();
 	jarray = json_object_new_array();
@@ -389,18 +424,18 @@ static int ws_device(int sock, const char *uuid,
 
 	log_info("TX JSON %s", jobjstring);
 
-	psd = g_new0(struct per_session_data_ws, 1);
-	psd->ws = g_hash_table_lookup(wstable, GINT_TO_POINTER(sock));
+	psd = g_hash_table_lookup(wstable, GINT_TO_POINTER(sock));
+	element = g_slist_nth(wsis, psd->index);
 
-	if (psd->ws == NULL) {
-		log_error("Not found");
+	if (element->data == NULL) {
+		log_error("Not found\n");
 		err = -EBADF;
 		goto done;
 	}
 
 	psd->len = sprintf((char *)&psd->buffer + LWS_PRE, "%d%s",
 						OPERATION_PREFIX, jobjstring);
-	lws_callback_on_writable(psd->ws);
+	lws_callback_on_writable(element->data);
 
 	while (!got_response && !connection_error)
 		lws_service(context, SERVICE_TIMEOUT);
@@ -416,8 +451,6 @@ done:
 	got_response = FALSE;
 	connection_error = FALSE;
 
-	g_free(psd->json);
-	g_free(psd);
 	json_object_put(jarray);
 
 	return err;
@@ -429,6 +462,7 @@ static int ws_signin(int sock, const char *uuid, const char *token,
 	int err;
 	const char *jobjstring;
 	json_object *jobj, *jarray;
+	GSList *element;
 
 	jobj = json_object_new_object();
 	jarray = json_object_new_array();
@@ -450,30 +484,28 @@ static int ws_signin(int sock, const char *uuid, const char *token,
 
 	log_info("TX JSON %s\n", jobjstring);
 
-	psd = g_new0(struct per_session_data_ws, 1);
-	psd->ws = g_hash_table_lookup(wstable, GINT_TO_POINTER(sock));
+	psd = g_hash_table_lookup(wstable, GINT_TO_POINTER(sock));
+	element = g_slist_nth(wsis, psd->index);
 
-	if (psd->ws == NULL) {
-		log_error("Not found");
+	if (element->data == NULL) {
+		log_error("Not found\n");
 		err = -EBADF;
 		goto done;
 	}
 
 	psd->len = sprintf((char *)&psd->buffer + LWS_PRE, "%d%s",
 					OPERATION_PREFIX, jobjstring);
-	lws_callback_on_writable(psd->ws);
+	lws_callback_on_writable(element->data);
 
 	/* Keep serving context until server responds or an error occurs */
 	while (!ready && !connection_error)
 		lws_service(context, SERVICE_TIMEOUT);
 
+
 	if (connection_error) {
 		err = -ECONNREFUSED;
 		goto done;
 	}
-
-	g_free(psd->json);
-	g_free(psd);
 
 	err = ws_device(sock, uuid, token, json);
 
@@ -492,6 +524,7 @@ static int ws_rmnode(int sock, const char *uuid, const char *token,
 	int err;
 	const char *jobjstring;
 	json_object *jobj, *jarray;
+	GSList *element;
 
 	jobj = json_object_new_object();
 	jarray = json_object_new_array();
@@ -513,18 +546,18 @@ static int ws_rmnode(int sock, const char *uuid, const char *token,
 
 	log_info("TX JSON %s", jobjstring);
 
-	psd = g_new0(struct per_session_data_ws, 1);
-	psd->ws = g_hash_table_lookup(wstable, GINT_TO_POINTER(sock));
+	psd = g_hash_table_lookup(wstable, GINT_TO_POINTER(sock));
+	element = g_slist_nth(wsis, psd->index);
 
-	if (psd->ws == NULL) {
-		log_error("Not found");
+	if (element->data == NULL) {
+		log_error("Not found\n");
 		err = -EBADF;
 		goto done;
 	}
 
 	psd->len = sprintf((char *)&psd->buffer + LWS_PRE, "%d%s",
 						OPERATION_PREFIX, jobjstring);
-	lws_callback_on_writable(psd->ws);
+	lws_callback_on_writable(element->data);
 
 	/* Keep serving context until server responds or an error occurs */
 	while (!got_response && !connection_error)
@@ -541,7 +574,6 @@ done:
 	got_response = FALSE;
 	connection_error = FALSE;
 
-	g_free(psd);
 	json_object_put(jarray);
 
 	return err;
@@ -553,6 +585,7 @@ static int ws_schema(int sock, const char *uuid, const char *token,
 	int err;
 	struct json_object *jobj, *ajobj, *jobjdev, *jarray;
 	const char *jobjstr;
+	GSList *element;
 
 	jobj = json_tokener_parse(jreq);
 	if (jobj == NULL)
@@ -571,37 +604,30 @@ static int ws_schema(int sock, const char *uuid, const char *token,
 	json_object_array_add(jarray, ajobj);
 	jobjstr = json_object_to_json_string(jarray);
 
-	psd = g_new0(struct per_session_data_ws, 1);
-	psd->ws = g_hash_table_lookup(wstable, GINT_TO_POINTER(sock));
-
-	if (psd->ws == NULL) {
-		log_error("Not found");
+	psd = g_hash_table_lookup(wstable, GINT_TO_POINTER(sock));
+	element = g_slist_nth(wsis, psd->index);
+	if (element->data == NULL) {
+		log_error("Not found\n");
 		err = -EBADF;
 		goto done;
 	}
 
 	psd->len = sprintf((char *)&psd->buffer + LWS_PRE, "%d%s",
 						MESSAGE_PREFIX, jobjstr);
-	lws_callback_on_writable(psd->ws);
-
-	/* Keep serving context until server responds or an error occurs */
-	while (!got_response && !connection_error)
-		lws_service(context, SERVICE_TIMEOUT);
+	lws_callback_on_writable(element->data);
 
 	if (connection_error) {
 		err = -ECONNREFUSED;
 		goto done;
 	}
 
-	err = handle_response(json);
+	err = 0;
 
 done:
 	got_response = FALSE;
 	connection_error = FALSE;
 
 	json_object_put(jarray);
-	g_free(psd->json);
-	g_free(psd);
 
 	return err;
 }
@@ -612,6 +638,7 @@ static int ws_data(int sock, const char *uuid, const char *token,
 	int err;
 	struct json_object *jobj, *jmsg;
 	const char *jobjstr;
+	GSList *element;
 
 	jobj = json_tokener_parse(jreq);
 	if (jobj == NULL)
@@ -624,30 +651,27 @@ static int ws_data(int sock, const char *uuid, const char *token,
 	json_object_array_add(jmsg, jobj);
 	jobjstr = json_object_to_json_string(jmsg);
 
-	psd = g_new0(struct per_session_data_ws, 1);
-	psd->ws = g_hash_table_lookup(wstable, GINT_TO_POINTER(sock));
+	psd = g_hash_table_lookup(wstable, GINT_TO_POINTER(sock));
 
-	if (psd->ws == NULL) {
-		log_error("Not found");
+	element = g_slist_nth(wsis, psd->index);
+	if (element->data == NULL) {
+		log_error("Not found\n");
 		err = -EBADF;
 		goto done;
 	}
 	psd->len = sprintf((char *)&psd->buffer[LWS_PRE], "%d%s",
 						OPERATION_PREFIX, jobjstr);
-	lws_callback_on_writable(psd->ws);
+	lws_callback_on_writable(element->data);
 	err = 0;
 
 	while (!got_response && !connection_error)
 		lws_service(context, SERVICE_TIMEOUT);
-
 
 done:
 	got_response = FALSE;
 	connection_error = FALSE;
 
 	json_object_put(jmsg);
-	g_free(psd->json);
-	g_free(psd);
 
 	return err;
 }
@@ -655,6 +679,9 @@ done:
 static int send_identity(void)
 {
 	int err = -ECONNREFUSED;
+	gpointer data;
+	struct lws *ws;
+
 	/*
 	 * Part of the connection establishment process is to identify yourself
 	 * an identity msg with an empty json will generate a new uuid/token
@@ -662,25 +689,32 @@ static int send_identity(void)
 	 */
 	psd->len = sprintf((char *) psd->buffer + LWS_PRE,
 							"42[\"identity\",{}]");
-	lws_callback_on_writable(psd->ws);
 
-	while (!ready && !connection_error)
+	data = g_slist_nth_data(wsis, psd->index);
+	if (!data)
+		return err;
+
+	ws = (struct lws *)data;
+	lws_callback_on_writable(ws);
+
+	while (!ready && !client_connection_error)
 		lws_service(context, SERVICE_TIMEOUT);
 
-	if (connection_error)
+	if (client_connection_error)
 		goto done;
 
 	err = 0;
 done:
 	ready = FALSE;
 	connected = TRUE;
+	client_connection_error = FALSE;
+	connection_error = FALSE;
 	got_response = FALSE;
-	g_free(psd);
 
 	return err;
 }
 
-static void handle_cloud_response(const char *resp)
+static void handle_cloud_response(const char *resp, struct lws *wsi)
 {
 	int packet_type, offset = 0, len = strlen(resp);
 	/* Find message type */
@@ -712,9 +746,60 @@ static void handle_cloud_response(const char *resp)
 		else if (!strncmp(resp, READY_RESPONSE, READY_RESPONSE_LEN))
 			ready = TRUE;
 		else if (!strncmp(resp, NOT_READY_RESPONSE,
-							NOT_READY_RESPONSE_LEN))
+						NOT_READY_RESPONSE_LEN)) {
 			connection_error = TRUE;
-		else {
+			client_connection_error = TRUE;
+		/*
+		 * Every time a device is updated a CONFIG_MSG is sent to all
+		 * devices that subscribed for the updated device's uuid
+		 * including the device itself, so here we parse the message,
+		 * which may contain an get_data, set_data or config and
+		 * call the watch_cb that will be responsible of forwarding
+		 * the message to the thing.
+		 */
+		} else if (!strncmp(resp, CONFIG_MSG, CONFIG_MSG_LEN)) {
+			json_raw_t json;
+			size_t realsize;
+			json_object *jobj, *jres;
+			const char *jobjstringres;
+			struct per_session_data_ws *session_data;
+
+			session_data = g_hash_table_lookup(wstable,
+				GINT_TO_POINTER(lws_get_socket_fd(wsi)));
+
+			if (!session_data)
+				break;
+
+			memset(&json, 0, sizeof(json_raw_t));
+
+			jres = json_tokener_parse(resp);
+			if (jres == NULL)
+				break;
+
+			jobj = json_object_array_get_idx(jres, 1);
+
+			jobjstringres = json_object_to_json_string(jobj);
+
+			realsize = strlen(jobjstringres) + 1;
+
+			json.data = (char *) realloc(json.data,
+							json.size + realsize);
+			if (json.data == NULL) {
+				log_error("Not enough memory\n");
+				break;
+			}
+
+			memcpy(json.data + json.size, jobjstringres, realsize);
+			json.size += realsize;
+			json.data[json.size - 1] = 0;
+
+			if (session_data->data.watch_cb)
+				session_data->data.watch_cb(json,
+						session_data->data.user_data);
+
+			json_object_put(jres);
+			free(json.data);
+		} else {
 			if (psd->json)
 				g_free(psd->json);
 			psd->json = g_strdup(resp);
@@ -728,18 +813,19 @@ static void handle_cloud_response(const char *resp)
 
 static int callback_lws_http(struct lws *wsi,
 					enum lws_callback_reasons reason,
-					void *user, void *in, size_t len)
+					void *user_data, void *in, size_t len)
 
 {
-	log_info("reason(%02X): %s\n", reason, lws_reason2str(reason));
+	log_info("reason(%02X): %s -- %p\n", reason,
+						lws_reason2str(reason), wsi);
 
 	switch (reason) {
 	case LWS_CALLBACK_ESTABLISHED:
 		log_info("LWS_CALLBACK_ESTABLISHED");
 		break;
 	case LWS_CALLBACK_CLIENT_CONNECTION_ERROR:
-		log_info("LWS_CALLBACK_CLIENT_CONNECTION_ERROR");
-		connection_error = TRUE;
+		log_info("LWS_CALLBACK_CLIENT_CONNECTION_ERROR\n");
+		client_connection_error = TRUE;
 		break;
 	case LWS_CALLBACK_CLIENT_FILTER_PRE_ESTABLISH:
 		break;
@@ -748,15 +834,16 @@ static int callback_lws_http(struct lws *wsi,
 		connected = TRUE;
 		break;
 	case LWS_CALLBACK_CLOSED:
-		log_info("LWS_CALLBACK_CLOSED");
-		connection_error = TRUE;
+		log_info("LWS_CALLBACK_CLOSED FOR WSI %p\n", wsi);
+		wsi = NULL;
+		/* FIXME: Needed? connection_error = TRUE; */
 		break;
 	case LWS_CALLBACK_CLOSED_HTTP:
 		break;
 	case LWS_CALLBACK_RECEIVE:
 		break;
 	case LWS_CALLBACK_CLIENT_RECEIVE:
-		handle_cloud_response((char *) in);
+		handle_cloud_response((char *) in, wsi);
 		break;
 	case LWS_CALLBACK_CLIENT_RECEIVE_PONG:
 		break;
@@ -764,10 +851,12 @@ static int callback_lws_http(struct lws *wsi,
 		{
 		int l;
 
-		if (psd->ws == wsi)
-			log_info("Client wsi %p writable", wsi);
+		gettimeofday(&psd->interval, NULL);
 
-		l = lws_write(psd->ws, &psd->buffer[LWS_PRE], psd->len,
+		psd = g_hash_table_lookup(wstable,
+				GINT_TO_POINTER(lws_get_socket_fd(wsi)));
+
+		l = lws_write(wsi, &psd->buffer[LWS_PRE], psd->len,
 								LWS_WRITE_TEXT);
 		log_info("Wrote (%d) bytes", l);
 
@@ -840,20 +929,36 @@ static struct lws_protocols protocols[] = {
 	{
 		"http-only",
 		callback_lws_http,
-		0, 65536, 0, NULL
+		0,
 	},
 	{
-		NULL, NULL, 0, 0, 0, NULL /* end of list */
+		NULL, NULL, 0/* end of list */
 	}
+};
+
+static const struct lws_extension exts[] = {
+	{
+		"permessage-deflate",
+		lws_extension_callback_pm_deflate,
+		"permessage-deflate; client_max_window_bits"
+	},
+	{
+		"deflate-frame",
+		lws_extension_callback_pm_deflate,
+		"deflate_frame"
+	},
+	{ NULL, NULL, NULL /* terminator */ }
 };
 
 static int ws_connect(void)
 {
 	struct lws_client_connect_info info;
+	struct lws *ws;
 	int err;
 	static char ads_port[300];
 	gboolean use_ssl = FALSE; /* wss */
 	int sock;
+	GSList *element;
 
 	memset(&info, 0, sizeof(info));
 	snprintf(ads_port, sizeof(ads_port) - 1, "%s:%u", host_address,
@@ -861,7 +966,8 @@ static int ws_connect(void)
 
 	log_info("Connecting to %s...", ads_port);
 
-	psd = g_new0(struct per_session_data_ws, 1);
+	psd = g_try_new0(struct per_session_data_ws, 1);
+
 	info.context = context;
 	info.ssl_connection = use_ssl;
 	info.address = host_address;
@@ -871,32 +977,51 @@ static int ws_connect(void)
 	info.origin = info.address;
 	info.ietf_version_or_minus_one = -1;
 	info.protocol = protocols[0].name;
+	info.client_exts = exts;
 
 	connected = FALSE;
+	client_connection_error = FALSE;
 	connection_error = FALSE;
 	got_response = FALSE;
 
-	psd->ws = lws_client_connect_via_info(&info);
+	/*
+	 * Every new connection is stored in the 'wsis' list. The client only
+	 * sees a fd which is the key for its respective per session data (psd).
+	 * In this struct we store an index that is related to the position of
+	 * the websocket instance (wsi) in the 'wsis' list. The relationships
+	 * are: fd <-> psd->index <-> wsi (wsis at psd->index)
+	 */
+	ws = lws_client_connect_via_info(&info);
+	wsis = g_slist_append(wsis, ws);
 
-	if (psd->ws == NULL) {
+	psd->index = conn_index++;
+
+	/*
+	 * Once we start a connection request, check if the wsi was allocated
+	 * Successfully.
+	 */
+	element = g_slist_nth_data(wsis, psd->index);
+	if (element == NULL) {
 		err = errno;
 		log_error("libwebsocket_client_connect(): %s(%d)",
 							strerror(err), err);
 		return -err;
 	}
 
-	while (!connected && !connection_error)
+	while (!connected && !client_connection_error)
 		lws_service(context, SERVICE_TIMEOUT);
 
-	if (connection_error) {
+	if (client_connection_error) {
 		g_free(psd);
 		return -ECONNREFUSED;
 	}
 
-	sock = lws_get_socket_fd(psd->ws);
-	g_hash_table_insert(wstable, GINT_TO_POINTER(sock), psd->ws);
+	sock = lws_get_socket_fd((struct lws *)element);
+	gettimeofday(&psd->interval, NULL);
+	g_hash_table_insert(wstable, GINT_TO_POINTER(sock), psd);
 
 	connected = FALSE;
+	client_connection_error = FALSE;
 	connection_error = FALSE;
 	got_response = FALSE;
 
@@ -905,6 +1030,7 @@ static int ws_connect(void)
 		return err;
 
 	connected = FALSE;
+	client_connection_error = FALSE;
 	connection_error = FALSE;
 	got_response = FALSE;
 
@@ -924,7 +1050,6 @@ static int ws_probe(const char *host, unsigned int port)
 	i.gid = -1;
 	i.uid = -1;
 	i.protocols = protocols;
-
 	context = lws_create_context(&i);
 
 	wstable = g_hash_table_new(g_direct_hash, g_direct_equal);
@@ -932,11 +1057,43 @@ static int ws_probe(const char *host, unsigned int port)
 	return 0;
 }
 
+static void custom_free(gpointer key, gpointer value, gpointer user_data)
+{
+	struct per_session_data_ws *psd = value;
+
+	g_free(psd->json);
+	g_free(psd);
+}
+
 static void ws_remove(void)
 {
+	g_hash_table_foreach(wstable, custom_free, NULL);
 	g_hash_table_destroy(wstable);
 	lws_context_destroy(context);
-	g_free(h_data);
+}
+
+/*
+ * Watch or poll the cloud to changes in the device.  uuid/token are used
+ * by the http protocol in order to constantly fetch specific device data
+ * since websockets uses a 'subscription' mechanism there is no need to
+ * store these values.
+ */
+static unsigned int proto_register_watch(int proto_sock, const char *uuid,
+				const char *token, void (*proto_watch_cb)
+				(json_raw_t, void *), void *user_data)
+{
+	struct to_fetch *data;
+	struct per_session_data_ws *value;
+
+	value = g_hash_table_lookup(wstable, GINT_TO_POINTER(proto_sock));
+
+	data = &value->data;
+	data->watch_cb = proto_watch_cb;
+	data->user_data = user_data;
+
+	g_hash_table_insert(wstable, GINT_TO_POINTER(proto_sock), value);
+
+	return 0;
 }
 
 struct proto_ops proto_ws = {
@@ -950,5 +1107,7 @@ struct proto_ops proto_ws = {
 	.rmnode = ws_rmnode,
 	.schema = ws_schema,
 	.data = ws_data,
-	.fetch = ws_device
+	.fetch = ws_device,
+	.async = proto_register_watch,
+	.setdata = ws_schema
 };
