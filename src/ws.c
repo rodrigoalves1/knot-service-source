@@ -1,4 +1,4 @@
-		/*
+/*
  * This file is part of the KNOT Project
  *
  * Copyright (c) 2015, CESAR. All rights reserved.
@@ -83,9 +83,8 @@ struct per_session_data_ws {
 	unsigned int len;
 	char *json;
 	struct to_fetch data;
+	gboolean destroy;
 };
-
-static struct per_session_data_ws *psd;
 
 /*
  * A received message has the following structure:
@@ -109,8 +108,7 @@ struct handshake_data {
 };
 
 static struct handshake_data *h_data;
-
-
+static struct per_session_data_ws *psd;
 
 static gboolean timeout_ws(gpointer user_data)
 {
@@ -118,32 +116,7 @@ static gboolean timeout_ws(gpointer user_data)
 
 	return TRUE;
 }
-/*
- * Return '0' if device has been created or a negative value
- * mapped to generic Linux -errno codes.
- */
-static int ret2errno(const char *json_str, const char *expected_result)
-{
-	json_object *jobj, *jobjentry;
-	int err = -EIO;
 
-	jobj = json_tokener_parse(json_str);
-	if (jobj == NULL)
-		goto done;
-
-	if (json_object_get_type(jobj) == json_type_array) {
-		jobjentry = json_object_array_get_idx(jobj, DEVICE_INDEX);
-		if (jobjentry == NULL)
-			goto done;
-	}
-	if (!strcmp(json_object_get_string(jobjentry), expected_result))
-		err = 0;
-
-done:
-	json_object_put(jobj);
-
-	return err;
-}
 static int handle_response(json_raw_t *json, char *property)
 {
 	size_t realsize;
@@ -336,8 +309,17 @@ static const char *lws_reason2str(enum lws_callback_reasons reason)
 
 static void ws_close(int sock)
 {
-	if (!g_hash_table_remove(wstable, GINT_TO_POINTER(sock)))
-		LOG_ERROR("Removing key: sock %d not found!\n", sock);
+	psd = g_hash_table_lookup(wstable, GINT_TO_POINTER(sock));
+	psd->destroy = TRUE;
+
+	lws_callback_on_writable(psd->ws);
+	lws_service(context, SERVICE_TIMEOUT);
+	if (!g_hash_table_remove(wstable, GINT_TO_POINTER(sock))) {
+		LOG_ERROR("Removing key: sock not found!\n");
+		return;
+	}
+	g_free(psd->json);
+	g_free(psd);
 }
 static int ws_mknode(int sock, const char *device_json,
 					json_raw_t *json)
@@ -566,7 +548,7 @@ static int ws_schema(int sock, const char *uuid, const char *token,
 {
 	int err;
 	struct json_object *jobj, *ajobj, *jobjdev, *jarray;
-	const char *jobjstr, *expected_result = "config";
+	const char *jobjstr;
 
 	jobj = json_tokener_parse(jreq);
 	if (jobj == NULL)
@@ -597,16 +579,12 @@ static int ws_schema(int sock, const char *uuid, const char *token,
 						MESSAGE_PREFIX, jobjstr);
 	lws_callback_on_writable(psd->ws);
 
-	/* Keep serving context until server responds or an error occurs */
-	while (!got_response && !connection_error)
-		lws_service(context, SERVICE_TIMEOUT);
-
 	if (connection_error) {
 		err = -ECONNREFUSED;
 		goto done;
 	}
 
-	err = ret2errno(psd->json, expected_result);
+	err = 0;
 
 done:
 	got_response = FALSE;
@@ -650,7 +628,6 @@ static int ws_data(int sock, const char *uuid, const char *token,
 	while (!got_response && !connection_error)
 		lws_service(context, SERVICE_TIMEOUT);
 
-
 done:
 	got_response = FALSE;
 	connection_error = FALSE;
@@ -671,8 +648,10 @@ static int send_identity(void)
 							"42[\"identity\",{}]");
 	lws_callback_on_writable(psd->ws);
 
-	while (!ready && !connection_error)
+	while (!ready && !connection_error) {
+		LOG_INFO("SEND_IDENTITY\n\n");
 		lws_service(context, SERVICE_TIMEOUT);
+	}
 
 	if (connection_error)
 		goto done;
@@ -681,6 +660,7 @@ static int send_identity(void)
 done:
 	ready = FALSE;
 	connected = TRUE;
+	connection_error = FALSE;
 	got_response = FALSE;
 
 	return err;
@@ -720,6 +700,7 @@ static void handle_cloud_response(char *resp, struct lws *wsi)
 			json_object *jobj, *jres;
 			const char *jobjstringres;
 			struct per_session_data_ws *session_data;
+
 			i = 0;
 
 			session_data = g_hash_table_lookup(wstable,
@@ -743,7 +724,8 @@ static void handle_cloud_response(char *resp, struct lws *wsi)
 
 			realsize = strlen(jobjstringres) + 1;
 
-			json.data = (char *) realloc(json.data, json.size + realsize);
+			json.data = (char *) realloc(json.data,
+							json.size + realsize);
 			if (json.data == NULL) {
 				LOG_ERROR("Not enough memory\n");
 				break;
@@ -789,11 +771,13 @@ static void handle_cloud_response(char *resp, struct lws *wsi)
 
 static int callback_lws_http(struct lws *wsi,
 					enum lws_callback_reasons reason,
-					void *user, void *in, size_t len)
+					void *user_data, void *in, size_t len)
 
 {
 	char *rsp;
-	LOG_INFO("reason(%02X): %s\n", reason, lws_reason2str(reason));
+
+	LOG_INFO("reason(%02X): %s -- %p\n", reason,
+						lws_reason2str(reason), wsi);
 
 	switch (reason) {
 	case LWS_CALLBACK_ESTABLISHED:
@@ -831,6 +815,11 @@ static int callback_lws_http(struct lws *wsi,
 		if (psd->ws == wsi)
 			LOG_INFO("Client wsi %p writable\n", wsi);
 
+		if (psd->destroy) {
+			lws_close_reason(wsi, LWS_CLOSE_STATUS_GOINGAWAY,
+								NULL, 0);
+			return -1;
+		}
 		l = lws_write(psd->ws, &psd->buffer[LWS_PRE], psd->len,
 								LWS_WRITE_TEXT);
 		LOG_INFO("Wrote (%d) bytes\n", l);
@@ -925,6 +914,7 @@ static int ws_connect(void)
 	LOG_INFO("Connecting to %s...\n", ads_port);
 
 	psd = g_try_new0(struct per_session_data_ws, 1);
+
 	info.context = context;
 	info.ssl_connection = use_ssl;
 	info.address = host_address;
@@ -940,6 +930,7 @@ static int ws_connect(void)
 	got_response = FALSE;
 
 	psd->ws = lws_client_connect_via_info(&info);
+	psd->destroy = FALSE;
 
 	if (psd->ws == NULL) {
 		err = errno;
@@ -957,7 +948,7 @@ static int ws_connect(void)
 	}
 
 	sock = lws_get_socket_fd(psd->ws);
-	g_hash_table_insert(wstable, GINT_TO_POINTER(sock), psd->ws);
+	g_hash_table_insert(wstable, GINT_TO_POINTER(sock), psd);
 
 	connected = FALSE;
 	connection_error = FALSE;
@@ -987,7 +978,6 @@ static int ws_probe(const char *host, unsigned int port)
 	i.gid = -1;
 	i.uid = -1;
 	i.protocols = protocols;
-
 	context = lws_create_context(&i);
 
 	wstable = g_hash_table_new(g_direct_hash, g_direct_equal);
@@ -995,13 +985,19 @@ static int ws_probe(const char *host, unsigned int port)
 	return 0;
 }
 
-static void ws_remove(void)
+static void custom_free(gpointer key, gpointer value, gpointer user_data)
 {
+	struct per_session_data_ws *psd = value;
+
 	g_free(psd->json);
 	g_free(psd);
+}
+
+static void ws_remove(void)
+{
+	g_hash_table_foreach(wstable, custom_free, NULL);
 	g_hash_table_destroy(wstable);
 	lws_context_destroy(context);
-	g_free(h_data);
 }
 
 /*
