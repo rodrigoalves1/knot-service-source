@@ -111,10 +111,37 @@ struct handshake_data {
 static struct handshake_data *h_data;
 static struct per_session_data_ws *psd;
 
+static void send_ping(gpointer key, gpointer value, gpointer user_data)
+{
+	struct timeval timenow;
+	GSList *element;
+	struct lws *ws;
+
+	gettimeofday(&timenow, NULL);
+
+	psd = (struct per_session_data_ws *) value;
+	if (timenow.tv_sec - psd->interval.tv_sec > 10
+						/*h_data->pingInterval/1000*/) {
+		gettimeofday(&psd->interval, NULL);
+		g_hash_table_replace(wstable, key, psd);
+		psd->len = sprintf((char *) psd->buffer + LWS_PRE, "2");
+
+		element = g_slist_nth(wsis, psd->index);
+		ws = element->data;
+
+		lws_callback_on_writable(ws);
+		lws_service(context, SERVICE_TIMEOUT);
+	}
+}
+
 static gboolean timeout_ws(gpointer user_data)
 {
-	lws_service(context, SERVICE_TIMEOUT);
+	struct per_session_data_ws *old_psd = psd;
 
+	lws_service(context, SERVICE_TIMEOUT);
+	/* check if some socket needs to send ping */
+	g_hash_table_foreach(wstable, send_ping, NULL);
+	psd = old_psd;
 	return TRUE;
 }
 
@@ -342,14 +369,14 @@ static void ws_close(int sock)
 		log_error("Removing wsi: no wsi found for sock %d\n", sock);
 
 	if (!g_hash_table_remove(wstable, GINT_TO_POINTER(sock))) {
-		log_error("Removing key: sock not found!\n");
+		log_error("Removing key: sock %d not found!\n", sock);
 		return;
 	}
 	g_free(psd->json);
 	g_free(psd);
 }
-static int ws_mknode(int sock, const char *device_json,
-					json_raw_t *json)
+
+static int ws_mknode(int sock, const char *device_json, json_raw_t *json)
 {
 	int err;
 	json_object *jobj, *jarray;
@@ -544,7 +571,7 @@ static int ws_rmnode(int sock, const char *uuid, const char *token,
 
 	jobjstring = json_object_to_json_string(jarray);
 
-	log_info("TX JSON %s", jobjstring);
+	log_info("TX JSON %s\n", jobjstring);
 
 	psd = g_hash_table_lookup(wstable, GINT_TO_POINTER(sock));
 	element = g_slist_nth(wsis, psd->index);
@@ -628,7 +655,6 @@ done:
 	connection_error = FALSE;
 
 	json_object_put(jarray);
-
 	return err;
 }
 
@@ -739,6 +765,7 @@ static void handle_cloud_response(const char *resp, struct lws *wsi)
 		break;
 	case EIO_PONG:
 		/* TODO */
+		log_info("PONG\n");
 		break;
 	case EIO_MSG:
 		if (!strcmp(resp, IDENTIFY_REQUEST))
@@ -1034,9 +1061,6 @@ static int ws_connect(void)
 	connection_error = FALSE;
 	got_response = FALSE;
 
-	/* FIXME: Investigate alternatives for libwebsocket_service() */
-	g_timeout_add_seconds(1, timeout_ws, NULL);
-
 	return sock;
 }
 
@@ -1053,6 +1077,9 @@ static int ws_probe(const char *host, unsigned int port)
 	context = lws_create_context(&i);
 
 	wstable = g_hash_table_new(g_direct_hash, g_direct_equal);
+
+	/* FIXME: Investigate alternatives for libwebsocket_service() */
+	g_timeout_add_seconds(1, timeout_ws, NULL);
 
 	return 0;
 }
