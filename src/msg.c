@@ -118,7 +118,7 @@ static int sensor_id_cmp(gconstpointer a, gconstpointer b)
 {
 	const knot_msg_schema *schema = a;
 	unsigned int sensor_id = GPOINTER_TO_UINT(b);
-
+	LOG_INFO("%d ------------------ %d\n\n\n", sensor_id, schema->sensor_id);
 	return sensor_id - schema->sensor_id;
 }
 
@@ -707,6 +707,7 @@ static GSList *msg_getdata(int sock, json_raw_t json, ssize_t *result)
 		kmitem = tmp->data;
 		kmitem->hdr.type = KNOT_MSG_GET_DATA;
 		kmitem->hdr.payload_len = sizeof(kmitem->sensor_id);
+		LOG_INFO("SENSOR TO GET DATA %d\n\n\n\n\n", kmitem->sensor_id);
 	}
 
 	return list;
@@ -1214,7 +1215,7 @@ static void update_device_getdata(const struct proto_ops *proto_ops,
 	json_raw_t json;
 	const char *jobjstr;
 	int i, err;
-
+	LOG_INFO("UPDAtE DEVICES GET DATA\n\n\n\n\n");
 	memset(&json, 0, sizeof(json));
 	err = proto_ops->fetch(proto_sock, uuid, token, &json);
 
@@ -1385,7 +1386,7 @@ static int8_t msg_data(int sock, int proto_sock,
 		LOG_ERROR("manager data(): %s(%d)\n", strerror(-err), -err);
 		return KNOT_CLOUD_FAILURE;
 	}
-
+	LOG_INFO("MSG DATAAAAAAAAAAAAAAAAAAAAAAAAAAAA \n\n\n\n\n");
 	update_device_getdata(proto_ops, proto_sock, trust->uuid, trust->token,
 								sensor_id);
 
@@ -1433,7 +1434,7 @@ static void update_device_setdata(const struct proto_ops *proto_ops,
 
 	memset(&json, 0, sizeof(json));
 	err = proto_ops->fetch(proto_sock, uuid, token, &json);
-
+	LOG_INFO("FEZ FETCH COM SUCESSO\n\n");
 	if (err < 0) {
 		LOG_ERROR("signin(): %s(%d)\n", strerror(-err), -err);
 		goto done;
@@ -1535,7 +1536,7 @@ static int8_t msg_setdata_resp(int sock, int proto_sock,
 	list = g_slist_find_custom(trust->schema, GUINT_TO_POINTER(sensor_id),
 								sensor_id_cmp);
 	if (!list) {
-		LOG_INFO("sensor_id(0x%02x): data type mismatch!\n", sensor_id);
+		LOG_INFO("sensor_id(0x%d): data type mismatch!\n", sensor_id);
 		return KNOT_INVALID_DATA;
 	}
 
@@ -1591,6 +1592,7 @@ static int8_t msg_setdata_resp(int sock, int proto_sock,
 	jobjstr = json_object_to_json_string(jobj);
 
 	memset(&json, 0, sizeof(json));
+	LOG_INFO("MSG SET DATA RESP\n\n\n");
 	err = proto_ops->data(proto_sock, trust->uuid, trust->token,
 							jobjstr, &json);
 	if (json.data)
