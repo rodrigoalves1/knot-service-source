@@ -49,7 +49,7 @@
 #define NOT_READY_RESPONSE_LEN	(sizeof(NOT_READY_RESPONSE) - 1)
 #define CONFIG_MSG_LEN		(sizeof(CONFIG_MSG) - 1)
 #define CLOUD_PATH		"/socket.io/?EIO=4&transport=websocket"
-#define DEFAULT_CLOUD_HOST	"localhost"
+#define DEFAULT_CLOUD_HOST	"10.42.0.1"
 #define DEVICE_INDEX		0
 #define OPERATION_PREFIX	420
 #define MESSAGE_PREFIX		42
@@ -62,7 +62,7 @@ static gboolean connected = FALSE;
 static gboolean client_connection_error = FALSE;
 static gboolean ready = FALSE;
 struct lws_client_connect_info info;
-static char *host_address = "localhost";
+static char *host_address = "10.42.0.1";
 static int host_port = 3000;
 static GSList *wsis = NULL;
 static gint conn_index = 0;
@@ -172,6 +172,8 @@ static int handle_response(json_raw_t *json)
 	if (jprop)
 		jobjstringres = json_object_to_json_string(jprop);
 
+	log_info("\n\n\n%s\n\n\n", jobjstringres);
+
 	realsize = strlen(jobjstringres) + 1;
 
 	json->data = (char *) realloc(json->data, json->size + realsize);
@@ -216,7 +218,7 @@ done:
 	g_free(h_data);
 	json_object_put(jobj);
 }
-
+/*
 static const char *lws_reason2str(enum lws_callback_reasons reason)
 {
 	switch (reason) {
@@ -346,7 +348,7 @@ static const char *lws_reason2str(enum lws_callback_reasons reason)
 	default:
 		return "UNKNOWN";
 	}
-}
+}*/
 
 static void ws_close(int sock)
 {
@@ -422,6 +424,7 @@ static int ws_mknode(int sock, const char *device_json, json_raw_t *json)
 	 * won't be overwritten.
 	 */
 	lws_callback_on_writable(entry->data);
+	log_info("TX JSON %s", jobjstring);
 	while (!got_response && !connection_error)
 		lws_service(context, SERVICE_TIMEOUT);
 
@@ -652,10 +655,12 @@ static int ws_update(int sock, const char *uuid, const char *token,
 		err = -EBADF;
 		goto done;
 	}
-
 	psd->len = snprintf((char *)&psd->buffer + LWS_PRE, MAX_PAYLOAD, "%d%s",
 						MESSAGE_PREFIX, jobjstr);
 	lws_callback_on_writable(entry->data);
+
+	log_info("JSON TX: %s", jobjstr);
+
 	lws_service(context, SERVICE_TIMEOUT);
 
 	if (connection_error) {
@@ -768,6 +773,7 @@ static void handle_cloud_response(const char *resp, struct lws *wsi)
 	const char *jobjstringres;
 	struct per_session_data_ws *session_data;
 
+	log_info("JSON_RX %s", resp);
 	/* Find message type */
 	if (sscanf(resp, "%1d", &packet_type) < 0)
 		return;
@@ -782,7 +788,6 @@ static void handle_cloud_response(const char *resp, struct lws *wsi)
 			offset++;
 		resp += offset;
 	}
-	log_info("JSON_RX %d = %s", packet_type, resp);
 
 	switch (packet_type) {
 	case EIO_OPEN:
@@ -862,9 +867,6 @@ static int callback_lws_http(struct lws *wsi,
 					void *user_data, void *in, size_t len)
 
 {
-	log_info("reason(%02X): %s - wsi: %p", reason,
-						lws_reason2str(reason), wsi);
-
 	switch (reason) {
 	case LWS_CALLBACK_ESTABLISHED:
 		log_info("LWS_CALLBACK_ESTABLISHED");
