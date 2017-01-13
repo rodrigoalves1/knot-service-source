@@ -197,7 +197,7 @@ done:
 	g_free(h_data);
 	json_object_put(jobj);
 }
-
+/*
 static const char *lws_reason2str(enum lws_callback_reasons reason)
 {
 	switch (reason) {
@@ -327,7 +327,7 @@ static const char *lws_reason2str(enum lws_callback_reasons reason)
 	default:
 		return "UNKNOWN";
 	}
-}
+}*/
 
 static void ws_close(int sock)
 {
@@ -795,9 +795,6 @@ static int callback_lws_http(struct lws *wsi,
 
 {
 	char *rsp;
-
-	LOG_INFO("reason(%02X): %s -- %p\n", reason,
-						lws_reason2str(reason), wsi);
 
 	switch (reason) {
 	case LWS_CALLBACK_ESTABLISHED:
