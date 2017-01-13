@@ -172,6 +172,8 @@ static int handle_response(json_raw_t *json)
 	if (jprop)
 		jobjstringres = json_object_to_json_string(jprop);
 
+	log_info("\n\n\n%s\n\n\n", jobjstringres);
+
 	realsize = strlen(jobjstringres) + 1;
 
 	json->data = (char *) realloc(json->data, json->size + realsize);
@@ -216,7 +218,7 @@ done:
 	g_free(h_data);
 	json_object_put(jobj);
 }
-
+/*
 static const char *lws_reason2str(enum lws_callback_reasons reason)
 {
 	switch (reason) {
@@ -346,7 +348,7 @@ static const char *lws_reason2str(enum lws_callback_reasons reason)
 	default:
 		return "UNKNOWN";
 	}
-}
+}*/
 
 static void ws_close(int sock)
 {
@@ -652,9 +654,10 @@ static int ws_update(int sock, const char *uuid, const char *token,
 		err = -EBADF;
 		goto done;
 	}
-
 	psd->len = snprintf((char *)&psd->buffer + LWS_PRE, MAX_PAYLOAD, "%d%s",
 						MESSAGE_PREFIX, jobjstr);
+	log_info("JSON TX: %s\n\n", jobjstr);
+
 	lws_callback_on_writable(element->data);
 	lws_service(context, SERVICE_TIMEOUT);
 
@@ -862,9 +865,6 @@ static int callback_lws_http(struct lws *wsi,
 					void *user_data, void *in, size_t len)
 
 {
-	log_info("reason(%02X): %s -- %p\n", reason,
-						lws_reason2str(reason), wsi);
-
 	switch (reason) {
 	case LWS_CALLBACK_ESTABLISHED:
 		log_info("LWS_CALLBACK_ESTABLISHED");
