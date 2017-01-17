@@ -177,11 +177,11 @@ static gboolean node_io_watch(GIOChannel *io, GIOCondition cond,
 		 * last reference and the destroy callback
 		 * is called.
 		 */
-		if (cond & G_IO_HUP && session->proto_io) {
+		/*if (cond & G_IO_HUP && session->proto_io) {
 			proto_sock =
 				g_io_channel_unix_get_fd(session->proto_io);
 			proto_ops[proto_index]->close(proto_sock);
-		}
+		}*/
 		session->node_id = 0;
 		return FALSE;
 	}
@@ -263,7 +263,7 @@ static gboolean accept_cb(GIOChannel *io, GIOCondition cond,
 	proto_sock = proto_ops[proto_index]->connect();
 	if (proto_sock < 0) {
 		LOG_INFO("Can't connect to cloud service!\n");
-		return FALSE;
+		//return FALSE;
 	}
 
 	node_io = g_io_channel_unix_new(sockfd);

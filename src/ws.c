@@ -58,6 +58,7 @@ struct lws_context *context;
 static GHashTable *wstable;
 gboolean got_response = FALSE;
 gboolean connection_error = FALSE;
+gboolean client_connection_error = FALSE;
 gboolean connected = FALSE;
 static gboolean ready = FALSE;
 struct lws_client_connect_info info;
@@ -74,11 +75,11 @@ struct to_fetch {
 };
 
 struct per_session_data_ws {
-	struct lws *ws;
 	/*
 	 * This buffer MUST have LWS_PRE bytes valid BEFORE the pointer. this
 	 * is defined in the lws documentation,
 	 */
+	struct lws *ws;
 	unsigned char buffer[LWS_PRE + MAX_PAYLOAD];
 	unsigned int len;
 	char *json;
@@ -110,7 +111,7 @@ struct handshake_data {
 
 static struct handshake_data *h_data;
 static struct per_session_data_ws *psd;
-
+/*
 static void send_ping(gpointer key, gpointer value, gpointer user_data)
 {
 	struct timeval timenow;
@@ -119,23 +120,23 @@ static void send_ping(gpointer key, gpointer value, gpointer user_data)
 
 	psd = (struct per_session_data_ws *) value;
 	if (timenow.tv_sec - psd->interval.tv_sec > 10
-						/*h_data->pingInterval/1000*/) {
+						h_data->pingInterval/1000) {
 		gettimeofday(&psd->interval, NULL);
 		g_hash_table_replace(wstable, key, psd);
 		psd->len = sprintf((char *) psd->buffer + LWS_PRE, "2");
 		lws_callback_on_writable(psd->ws);
 		lws_service(context, SERVICE_TIMEOUT);
 	}
-}
+}*/
 
 static gboolean timeout_ws(gpointer user_data)
 {
-	struct per_session_data_ws *old_psd = psd;
+	//struct per_session_data_ws *old_psd = psd;
 
 	lws_service(context, SERVICE_TIMEOUT);
 	/* check if some socket needs to send ping */
-	g_hash_table_foreach(wstable, send_ping, NULL);
-	psd = old_psd;
+	//g_hash_table_foreach(wstable, send_ping, NULL);
+	//psd = old_psd;
 	return TRUE;
 }
 
@@ -327,21 +328,22 @@ static const char *lws_reason2str(enum lws_callback_reasons reason)
 	default:
 		return "UNKNOWN";
 	}
-}*/
-
+}
+*/
 static void ws_close(int sock)
 {
 	psd = g_hash_table_lookup(wstable, GINT_TO_POINTER(sock));
 	psd->destroy = TRUE;
 
+	LOG_INFO("PSD-WS %p FREED\n", psd->ws);
 	lws_callback_on_writable(psd->ws);
 	lws_service(context, SERVICE_TIMEOUT);
-	if (!g_hash_table_remove(wstable, GINT_TO_POINTER(sock))) {
+	/*if (!g_hash_table_remove(wstable, GINT_TO_POINTER(sock))) {
 		LOG_ERROR("Removing key: sock %d not found!\n", sock);
 		return;
-	}
-	g_free(psd->json);
-	g_free(psd);
+	}*/
+	//g_free(psd->json);
+	//g_free(psd);
 }
 
 static int ws_mknode(int sock, const char *device_json, json_raw_t *json)
@@ -490,10 +492,12 @@ static int ws_signin(int sock, const char *uuid, const char *token,
 	while (!ready && !connection_error)
 		lws_service(context, SERVICE_TIMEOUT);
 
+
 	if (connection_error) {
 		err = -ECONNREFUSED;
 		goto done;
 	}
+	LOG_INFO("\n\n\nCONNECTION ERRORADSASDADSFD\n\n\n");
 
 	err = ws_device(sock, uuid, token, json);
 
@@ -667,18 +671,19 @@ static int send_identity(void)
 							"42[\"identity\",{}]");
 	lws_callback_on_writable(psd->ws);
 
-	while (!ready && !connection_error) {
-		LOG_INFO("SEND_IDENTITY\n\n");
+	LOG_INFO("SEND_IDENTITY\n\n");
+	while (!ready && !client_connection_error) {
 		lws_service(context, SERVICE_TIMEOUT);
 	}
 
-	if (connection_error)
+	if (client_connection_error)
 		goto done;
 
 	err = 0;
 done:
 	ready = FALSE;
 	connected = TRUE;
+	client_connection_error = FALSE;
 	connection_error = FALSE;
 	got_response = FALSE;
 
@@ -708,12 +713,16 @@ static void handle_cloud_response(char *resp, struct lws *wsi)
 	case EIO_MSG:
 		if (!strcmp(resp, IDENTIFY_REQUEST)) {
 			connected = TRUE;
+			LOG_INFO("IDENTIFY_REQUEST\n\n");
 		} else if (!strncmp(resp, READY_RESPONSE,
 						READY_RESPONSE_LEN)) {
 			ready = TRUE;
+			LOG_INFO("READY_RESPONSEREADY_RESPONSE\n\n");
 		} else if (!strncmp(resp, NOT_READY_RESPONSE,
 					NOT_READY_RESPONSE_LEN)) {
 			connection_error = TRUE;
+			client_connection_error = TRUE;
+			LOG_INFO("NOT_READY_RESPONSENOT_READY_RESPONSE\n\n");
 		} else if (!strncmp(resp, CONFIG_MSG, CONFIG_MSG_LEN)) {
 			json_raw_t json;
 			size_t realsize;
@@ -796,13 +805,16 @@ static int callback_lws_http(struct lws *wsi,
 {
 	char *rsp;
 
+	//LOG_INFO("reason(%02X): %s -- %p\n", reason,
+	//					lws_reason2str(reason), wsi);
+
 	switch (reason) {
 	case LWS_CALLBACK_ESTABLISHED:
 		LOG_INFO("LWS_CALLBACK_ESTABLISHED\n");
 		break;
 	case LWS_CALLBACK_CLIENT_CONNECTION_ERROR:
 		LOG_INFO("LWS_CALLBACK_CLIENT_CONNECTION_ERROR\n");
-		connection_error = TRUE;
+		client_connection_error = TRUE;
 		break;
 	case LWS_CALLBACK_CLIENT_FILTER_PRE_ESTABLISH:
 		break;
@@ -810,8 +822,9 @@ static int callback_lws_http(struct lws *wsi,
 		LOG_INFO("LWS_CALLBACK_CLIENT_ESTABLISHED\n");
 		break;
 	case LWS_CALLBACK_CLOSED:
-		LOG_INFO("LWS_CALLBACK_CLOSED\n");
-		connection_error = TRUE;
+		LOG_INFO("LWS_CALLBACK_CLOSED FOR WSI %p\n", wsi);
+		wsi = NULL;
+		//connection_error = TRUE;
 		break;
 	case LWS_CALLBACK_CLOSED_HTTP:
 		break;
@@ -830,13 +843,17 @@ static int callback_lws_http(struct lws *wsi,
 		int l;
 
 		gettimeofday(&psd->interval, NULL);
-
+		LOG_INFO("Client wsi %p writable111\n", psd->ws);
+		psd = g_hash_table_lookup(wstable,
+				GINT_TO_POINTER(lws_get_socket_fd(wsi)));
 		if (psd->ws == wsi)
 			LOG_INFO("Client wsi %p writable\n", wsi);
 
-		if (psd->destroy) {
-			lws_close_reason(wsi, LWS_CLOSE_STATUS_GOINGAWAY,
+		if (psd->destroy == TRUE) {
+			LOG_INFO("DESTROY FLAG TRUE %p\n\n\n\n",psd->ws);
+			lws_close_reason(wsi, LWS_CLOSE_STATUS_NORMAL,
 								NULL, 0);
+			lws_rx_flow_control(wsi, 0);
 			return -1;
 		}
 		l = lws_write(psd->ws, &psd->buffer[LWS_PRE], psd->len,
@@ -869,7 +886,10 @@ static int callback_lws_http(struct lws *wsi,
 	case LWS_CALLBACK_PROTOCOL_INIT:
 	case LWS_CALLBACK_PROTOCOL_DESTROY:
 	case LWS_CALLBACK_WSI_CREATE: // always protocol[0]
+		break;
 	case LWS_CALLBACK_WSI_DESTROY: // always protocol[0]
+		LOG_INFO("WSI %p DESTRYED\n", wsi);
+		break;
 	case LWS_CALLBACK_GET_THREAD_ID:
 	case LWS_CALLBACK_ADD_POLL_FD:
 	case LWS_CALLBACK_DEL_POLL_FD:
@@ -919,6 +939,20 @@ static struct lws_protocols protocols[] = {
 	}
 };
 
+static const struct lws_extension exts[] = {
+	{
+		"permessage-deflate",
+		lws_extension_callback_pm_deflate,
+		"permessage-deflate; client_max_window_bits"
+	},
+	{
+		"deflate-frame",
+		lws_extension_callback_pm_deflate,
+		"deflate_frame"
+	},
+	{ NULL, NULL, NULL /* terminator */ }
+};
+
 static int ws_connect(void)
 {
 	struct lws_client_connect_info info;
@@ -943,8 +977,10 @@ static int ws_connect(void)
 	info.origin = info.address;
 	info.ietf_version_or_minus_one = -1;
 	info.protocol = protocols[0].name;
+	info.client_exts = exts;
 
 	connected = FALSE;
+	client_connection_error = FALSE;
 	connection_error = FALSE;
 	got_response = FALSE;
 
@@ -957,12 +993,15 @@ static int ws_connect(void)
 							strerror(err), err);
 		return -err;
 	}
-
-	while (!connected && !connection_error)
+	LOG_INFO("TRYING TO CONNECT\n\n");
+	while (!connected && !client_connection_error){
+		//LOG_INFO("stuck on ws_connect %d - %d\n\n", connected, client_connection_error);
 		lws_service(context, SERVICE_TIMEOUT);
+	}
 
-	if (connection_error) {
-		g_free(psd);
+	if (client_connection_error) {
+		LOG_INFO("client_connection_error\n\n");
+		//g_free(psd);
 		return -ECONNREFUSED;
 	}
 
@@ -971,6 +1010,7 @@ static int ws_connect(void)
 	g_hash_table_insert(wstable, GINT_TO_POINTER(sock), psd);
 
 	connected = FALSE;
+	client_connection_error = FALSE;
 	connection_error = FALSE;
 	got_response = FALSE;
 
@@ -979,6 +1019,7 @@ static int ws_connect(void)
 		return err;
 
 	connected = FALSE;
+	client_connection_error = FALSE;
 	connection_error = FALSE;
 	got_response = FALSE;
 
@@ -1008,13 +1049,14 @@ static int ws_probe(const char *host, unsigned int port)
 static void custom_free(gpointer key, gpointer value, gpointer user_data)
 {
 	struct per_session_data_ws *psd = value;
-
+	LOG_INFO("CUSTOM FREEEEEE\n\n");
 	g_free(psd->json);
 	g_free(psd);
 }
 
 static void ws_remove(void)
 {
+	LOG_INFO("CONTEXTTOOO ADESETURTAOSIDFOSAD,S\n\n\n\n\n\n\n\n");
 	g_hash_table_foreach(wstable, custom_free, NULL);
 	g_hash_table_destroy(wstable);
 	lws_context_destroy(context);
