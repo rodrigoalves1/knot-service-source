@@ -64,6 +64,8 @@ static gboolean ready = FALSE;
 struct lws_client_connect_info info;
 static char *host_address = "localhost";
 static int host_port = 3000;
+GSList *wsis = NULL;
+static gint i = 0;
 
 /* Struct used to fetch data from cloud and send to THING */
 struct to_fetch {
@@ -79,7 +81,7 @@ struct per_session_data_ws {
 	 * This buffer MUST have LWS_PRE bytes valid BEFORE the pointer. this
 	 * is defined in the lws documentation,
 	 */
-	struct lws *ws;
+	gint index;
 	unsigned char buffer[LWS_PRE + MAX_PAYLOAD];
 	unsigned int len;
 	char *json;
@@ -332,18 +334,25 @@ static const char *lws_reason2str(enum lws_callback_reasons reason)
 */
 static void ws_close(int sock)
 {
+	GSList *element;
+	struct lws *ws;
 	psd = g_hash_table_lookup(wstable, GINT_TO_POINTER(sock));
 	psd->destroy = TRUE;
 
-	LOG_INFO("PSD-WS %p FREED\n", psd->ws);
-	lws_callback_on_writable(psd->ws);
+	element = g_slist_nth(wsis, psd->index);
+	ws = element->data;
+	LOG_INFO("PSD-WS %p FREED\n", ws);
+	lws_callback_on_writable(ws);
 	lws_service(context, SERVICE_TIMEOUT);
-	/*if (!g_hash_table_remove(wstable, GINT_TO_POINTER(sock))) {
+	LOG_INFO("TEST PURPOSE ONLY\n");
+	if (g_slist_remove(wsis, &psd->index) == NULL)
+		LOG_ERROR("COULD NOT REMOVE WSI\n\n");
+	if (!g_hash_table_remove(wstable, GINT_TO_POINTER(sock))) {
 		LOG_ERROR("Removing key: sock %d not found!\n", sock);
 		return;
-	}*/
-	//g_free(psd->json);
-	//g_free(psd);
+	}
+	g_free(psd->json);
+	g_free(psd);
 }
 
 static int ws_mknode(int sock, const char *device_json, json_raw_t *json)
@@ -351,6 +360,7 @@ static int ws_mknode(int sock, const char *device_json, json_raw_t *json)
 	int err;
 	json_object *jobj, *jarray;
 	const char *jobjstring;
+	GSList *element;
 
 	jobj = json_tokener_parse(device_json);
 	if (jobj == NULL)
@@ -362,15 +372,16 @@ static int ws_mknode(int sock, const char *device_json, json_raw_t *json)
 	jobjstring = json_object_to_json_string(jarray);
 
 	psd = g_hash_table_lookup(wstable, GINT_TO_POINTER(sock));
+	element = g_slist_nth(wsis, psd->index);
 
-	if (psd->ws == NULL) {
+	if (element->data == NULL) {
 		err = -EBADF;
 		LOG_ERROR("Not found\n");
 		goto done;
 	}
 	psd->len = sprintf((char *) psd->buffer + LWS_PRE, "%d%s",
 					OPERATION_PREFIX, jobjstring);
-	lws_callback_on_writable(psd->ws);
+	lws_callback_on_writable(element->data);
 
 	/* Keep serving context until server responds or an error occurs */
 	while (!got_response && !connection_error)
@@ -398,6 +409,7 @@ static int ws_device(int sock, const char *uuid,
 	int err;
 	const char *jobjstring;
 	json_object *jobj, *jarray;
+	GSList *element;
 
 	jobj = json_object_new_object();
 	jarray = json_object_new_array();
@@ -419,8 +431,9 @@ static int ws_device(int sock, const char *uuid,
 	LOG_INFO("TX JSON %s\n", jobjstring);
 
 	psd = g_hash_table_lookup(wstable, GINT_TO_POINTER(sock));
+	element = g_slist_nth(wsis, psd->index);
 
-	if (psd->ws == NULL) {
+	if (element->data == NULL) {
 		LOG_ERROR("Not found\n");
 		err = -EBADF;
 		goto done;
@@ -428,7 +441,7 @@ static int ws_device(int sock, const char *uuid,
 
 	psd->len = sprintf((char *)&psd->buffer + LWS_PRE, "%d%s",
 						OPERATION_PREFIX, jobjstring);
-	lws_callback_on_writable(psd->ws);
+	lws_callback_on_writable(element->data);
 
 	while (!got_response && !connection_error)
 		lws_service(context, SERVICE_TIMEOUT);
@@ -455,6 +468,7 @@ static int ws_signin(int sock, const char *uuid, const char *token,
 	int err;
 	const char *jobjstring;
 	json_object *jobj, *jarray;
+	GSList *element;
 
 	jobj = json_object_new_object();
 	jarray = json_object_new_array();
@@ -477,8 +491,9 @@ static int ws_signin(int sock, const char *uuid, const char *token,
 	LOG_INFO("TX JSON %s\n", jobjstring);
 
 	psd = g_hash_table_lookup(wstable, GINT_TO_POINTER(sock));
+	element = g_slist_nth(wsis, psd->index);
 
-	if (psd->ws == NULL) {
+	if (element->data == NULL) {
 		LOG_ERROR("Not found\n");
 		err = -EBADF;
 		goto done;
@@ -486,7 +501,7 @@ static int ws_signin(int sock, const char *uuid, const char *token,
 
 	psd->len = sprintf((char *)&psd->buffer + LWS_PRE, "%d%s",
 					OPERATION_PREFIX, jobjstring);
-	lws_callback_on_writable(psd->ws);
+	lws_callback_on_writable(element->data);
 
 	/* Keep serving context until server responds or an error occurs */
 	while (!ready && !connection_error)
@@ -516,6 +531,7 @@ static int ws_rmnode(int sock, const char *uuid, const char *token,
 	int err;
 	const char *jobjstring;
 	json_object *jobj, *jarray;
+	GSList *element;
 
 	jobj = json_object_new_object();
 	jarray = json_object_new_array();
@@ -537,8 +553,9 @@ static int ws_rmnode(int sock, const char *uuid, const char *token,
 
 	LOG_INFO("TX JSON %s\n", jobjstring);
 	psd = g_hash_table_lookup(wstable, GINT_TO_POINTER(sock));
+	element = g_slist_nth(wsis, psd->index);
 
-	if (psd->ws == NULL) {
+	if (element->data == NULL) {
 		LOG_ERROR("Not found\n");
 		err = -EBADF;
 		goto done;
@@ -546,7 +563,7 @@ static int ws_rmnode(int sock, const char *uuid, const char *token,
 
 	psd->len = sprintf((char *)&psd->buffer + LWS_PRE, "%d%s",
 						OPERATION_PREFIX, jobjstring);
-	lws_callback_on_writable(psd->ws);
+	lws_callback_on_writable(element->data);
 
 	/* Keep serving context until server responds or an error occurs */
 	while (!got_response && !connection_error)
@@ -574,6 +591,7 @@ static int ws_schema(int sock, const char *uuid, const char *token,
 	int err;
 	struct json_object *jobj, *ajobj, *jobjdev, *jarray;
 	const char *jobjstr;
+	GSList *element;
 
 	jobj = json_tokener_parse(jreq);
 	if (jobj == NULL)
@@ -593,8 +611,8 @@ static int ws_schema(int sock, const char *uuid, const char *token,
 	jobjstr = json_object_to_json_string(jarray);
 
 	psd = g_hash_table_lookup(wstable, GINT_TO_POINTER(sock));
-
-	if (psd->ws == NULL) {
+	element = g_slist_nth(wsis, psd->index);
+	if (element->data == NULL) {
 		LOG_ERROR("Not found\n");
 		err = -EBADF;
 		goto done;
@@ -602,7 +620,7 @@ static int ws_schema(int sock, const char *uuid, const char *token,
 
 	psd->len = sprintf((char *)&psd->buffer + LWS_PRE, "%d%s",
 						MESSAGE_PREFIX, jobjstr);
-	lws_callback_on_writable(psd->ws);
+	lws_callback_on_writable(element->data);
 
 	if (connection_error) {
 		err = -ECONNREFUSED;
@@ -625,6 +643,7 @@ static int ws_data(int sock, const char *uuid, const char *token,
 	int err;
 	struct json_object *jobj, *jmsg;
 	const char *jobjstr;
+	GSList *element;
 
 	jobj = json_tokener_parse(jreq);
 	if (jobj == NULL)
@@ -638,14 +657,15 @@ static int ws_data(int sock, const char *uuid, const char *token,
 	jobjstr = json_object_to_json_string(jmsg);
 
 	psd = g_hash_table_lookup(wstable, GINT_TO_POINTER(sock));
-	if (psd->ws == NULL) {
+	element = g_slist_nth(wsis, psd->index);
+	if (element->data == NULL) {
 		LOG_ERROR("Not found\n");
 		err = -EBADF;
 		goto done;
 	}
 	psd->len = sprintf((char *)&psd->buffer[LWS_PRE], "%d%s",
 						OPERATION_PREFIX, jobjstr);
-	lws_callback_on_writable(psd->ws);
+	lws_callback_on_writable(element->data);
 	err = 0;
 
 	while (!got_response && !connection_error)
@@ -663,13 +683,22 @@ done:
 static int send_identity(void)
 {
 	int err = -ECONNREFUSED;
+	gpointer data;
+	struct lws *ws;
 	/*
 	 * An identity msg with an empty json will generate a new uuid/token
 	 * a possible FIXME is to authenticate the owner (GW)
 	 */
 	psd->len = sprintf((char *) psd->buffer + LWS_PRE,
 							"42[\"identity\",{}]");
-	lws_callback_on_writable(psd->ws);
+
+	LOG_INFO("INDEX N SEND_IDENTITY %d", psd->index);
+	data = g_slist_nth_data(wsis, psd->index);
+	if (data) {
+		ws = (struct lws*)data;
+		lws_callback_on_writable(ws);
+	} else
+		return -1;
 
 	LOG_INFO("SEND_IDENTITY\n\n");
 	while (!ready && !client_connection_error) {
@@ -735,7 +764,7 @@ static void handle_cloud_response(char *resp, struct lws *wsi)
 			session_data = g_hash_table_lookup(wstable,
 				GINT_TO_POINTER(lws_get_socket_fd(wsi)));
 
-			if (!session_data->ws)
+			if (!session_data)
 				break;
 
 			while (resp[i] != '[' && i < len)
@@ -843,20 +872,20 @@ static int callback_lws_http(struct lws *wsi,
 		int l;
 
 		gettimeofday(&psd->interval, NULL);
-		LOG_INFO("Client wsi %p writable111\n", psd->ws);
+		LOG_INFO("Client wsi %p writable111\n", psd);
 		psd = g_hash_table_lookup(wstable,
 				GINT_TO_POINTER(lws_get_socket_fd(wsi)));
-		if (psd->ws == wsi)
-			LOG_INFO("Client wsi %p writable\n", wsi);
+		//if (psd->ws == wsi)
+		//	LOG_INFO("Client wsi %p writable\n", wsi);
 
 		if (psd->destroy == TRUE) {
-			LOG_INFO("DESTROY FLAG TRUE %p\n\n\n\n",psd->ws);
+			LOG_INFO("DESTROY FLAG TRUE %p\n\n\n\n",psd);
 			lws_close_reason(wsi, LWS_CLOSE_STATUS_NORMAL,
 								NULL, 0);
 			lws_rx_flow_control(wsi, 0);
 			return -1;
 		}
-		l = lws_write(psd->ws, &psd->buffer[LWS_PRE], psd->len,
+		l = lws_write(wsi, &psd->buffer[LWS_PRE], psd->len,
 								LWS_WRITE_TEXT);
 		LOG_INFO("Wrote (%d) bytes\n", l);
 
@@ -956,10 +985,12 @@ static const struct lws_extension exts[] = {
 static int ws_connect(void)
 {
 	struct lws_client_connect_info info;
+	struct lws *ws;
 	int err;
 	static char ads_port[300];
 	gboolean use_ssl = FALSE; /* wss */
 	int sock;
+	GSList *element;
 
 	memset(&info, 0, sizeof(info));
 	snprintf(ads_port, sizeof(ads_port), "%s:%u", host_address, host_port);
@@ -983,11 +1014,15 @@ static int ws_connect(void)
 	client_connection_error = FALSE;
 	connection_error = FALSE;
 	got_response = FALSE;
-
-	psd->ws = lws_client_connect_via_info(&info);
+	ws = lws_client_connect_via_info(&info);
+	wsis = g_slist_append(wsis, ws);
+	//psd->ws = lws_client_connect_via_info(&info);
 	psd->destroy = FALSE;
+	psd->index = i++;
 
-	if (psd->ws == NULL) {
+	LOG_INFO("WS CONNECT VALUES %d",psd->index);
+	element = g_slist_nth_data(wsis, psd->index);
+	if (element == NULL) {
 		err = errno;
 		LOG_ERROR("libwebsocket_client_connect(): %s(%d)\n",
 							strerror(err), err);
@@ -1005,7 +1040,7 @@ static int ws_connect(void)
 		return -ECONNREFUSED;
 	}
 
-	sock = lws_get_socket_fd(psd->ws);
+	sock = lws_get_socket_fd((struct lws*)element);
 	gettimeofday(&psd->interval, NULL);
 	g_hash_table_insert(wstable, GINT_TO_POINTER(sock), psd);
 
@@ -1056,10 +1091,17 @@ static void custom_free(gpointer key, gpointer value, gpointer user_data)
 
 static void ws_remove(void)
 {
-	LOG_INFO("CONTEXTTOOO ADESETURTAOSIDFOSAD,S\n\n\n\n\n\n\n\n");
+	//GSList *list;
+	LOG_INFO("CONTEXTTOOO ADESETURTAOSIDFOSAD,S %d\n\n\n\n\n\n\n\n", g_slist_length(wsis));
 	g_hash_table_foreach(wstable, custom_free, NULL);
 	g_hash_table_destroy(wstable);
 	lws_context_destroy(context);
+
+	/*for (list = wsis; list; list = g_slist_next(list)) {
+		if (list != NULL)
+			g_list(list);
+	}*/
+	//g_slist_free(wsis);
 }
 
 /*
