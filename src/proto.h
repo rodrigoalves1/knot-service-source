@@ -64,6 +64,8 @@ struct proto_ops {
 	unsigned int (*async) (int proto_sock, const char *uuid,
 				const char *token, void (*proto_watch_cb)
 				(json_raw_t, void *), void *user_data);
+	int (*message) (int sock, const char *to_uuid, const char *topic,
+							const char *jreq);
 
 
 };
