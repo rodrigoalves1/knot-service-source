@@ -590,6 +590,53 @@ done:
 	return err;
 }
 
+static int ws_message(int sock, const char *to_uuid, const char *topic,
+							const char *jreq)
+{
+	int err;
+	struct json_object *jobj, *jmsg;
+	const char *jobjstr;
+	GSList *entry;
+
+	jobj = json_tokener_parse(jreq);
+	if (jobj == NULL)
+		return -EINVAL;
+
+	jmsg = json_object_new_array();
+	json_object_array_add(jmsg, json_object_new_string("message"));
+	json_object_object_add(jobj, "devices",
+					json_object_new_string("[\"*\"]"));
+	if (topic)
+		json_object_object_add(jobj, "topic",
+						json_object_new_string(topic));
+
+	json_object_object_add(jobj, "data", json_object_new_string(jreq));
+	json_object_array_add(jmsg, jobj);
+	jobjstr = json_object_to_json_string(jmsg);
+
+	psd = g_hash_table_lookup(wstable, GINT_TO_POINTER(sock));
+
+	entry = g_slist_nth(wsis, psd->index);
+	if (entry->data == NULL) {
+		hal_log_error("Not found");
+		err = -EBADF;
+		goto done;
+	}
+	psd->len = snprintf((char *)&psd->buffer + LWS_PRE, MAX_PAYLOAD, "%d%s",
+						MESSAGE_PREFIX, jobjstr);
+	hal_log_info("###################################%s", jobjstr);
+	lws_callback_on_writable(entry->data);
+	err = 0;
+
+done:
+	got_response = FALSE;
+	connection_error = FALSE;
+
+	json_object_put(jmsg);
+
+	return err;
+}
+
 static void handle_cloud_response(const char *resp, struct lws *wsi)
 {
 	int packet_type, offset = 0, len = strlen(resp);
@@ -599,6 +646,7 @@ static void handle_cloud_response(const char *resp, struct lws *wsi)
 	const char *jobjstringres;
 	struct per_session_data_ws *session_data;
 
+	hal_log_info("%s",resp);
 	/* Find message type */
 	if (sscanf(resp, "%1d", &packet_type) < 0)
 		return;
@@ -708,6 +756,7 @@ static int callback_lws_http(struct lws *wsi,
 	case LWS_CALLBACK_CLOSED:
 		hal_log_info("LWS_CALLBACK_CLOSED FOR WSI %p", wsi);
 		wsi = NULL;
+		connection_error = TRUE;
 		/* FIXME: Needed? connection_error = TRUE; */
 		break;
 	case LWS_CALLBACK_CLOSED_HTTP:
@@ -961,5 +1010,6 @@ struct proto_ops proto_ws = {
 	.data = ws_data,
 	.fetch = ws_device,
 	.async = proto_register_watch,
-	.setdata = ws_update
+	.setdata = ws_update,
+	.message = ws_message
 };

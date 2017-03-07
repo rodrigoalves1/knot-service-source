@@ -1406,6 +1406,9 @@ static int8_t msg_data(int sock, int proto_sock,
 	if (json.data)
 		free(json.data);
 
+	/* Broadcast data */
+	err = proto_ops->message(proto_sock, NULL, NULL, jobjstr);
+
 	json_object_put(jobj);
 
 	if (err < 0) {
