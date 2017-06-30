@@ -403,6 +403,16 @@ static int authenticate(const char *uuid, const char *token)
 	ssize_t nbytes;
 	int err;
 
+	if (!uuid) {
+		printf("Device's UUID missing!\n");
+		return -EINVAL;
+	}
+
+	if (!token) {
+		printf("Device's TOKEN missing!\n");
+		return -EINVAL;
+	}
+
 	memset(&msg, 0, sizeof(msg));
 	memset(&resp, 0, sizeof(resp));
 
