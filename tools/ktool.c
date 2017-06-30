@@ -1057,7 +1057,7 @@ int main(int argc, char *argv[])
 	else
 		sock = unix_connect(opt_unix);
 
-	if (sock == -1) {
+	if (sock < 0) {
 		err = -errno;
 		printf("connect(): %s (%d)\n", strerror(-err), -err);
 		return err;
