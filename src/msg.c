@@ -931,7 +931,7 @@ static int8_t msg_register(int sock, int proto_sock,
 {
 	GIOChannel *io, *proto_io;
 	struct trust *trust;
-	json_object *jobj;
+	json_object *jobj, *jarray;
 	const char *jobjstring;
 	char *uuid, *token;
 	json_raw_t json;
@@ -969,8 +969,9 @@ static int8_t msg_register(int sock, int proto_sock,
 
 	strncpy(thing_name, kreq->devName, len);
 
+	jarray = json_object_new_array();
 	jobj = json_object_new_object();
-	if (!jobj) {
+	if (!jobj || !jarray) {
 		hal_log_error("JSON: no memory");
 		return KNOT_ERROR_UNKNOWN;
 	}
@@ -981,12 +982,14 @@ static int8_t msg_register(int sock, int proto_sock,
 				json_object_new_string(thing_name));
 	json_object_object_add(jobj, "owner",
 				json_object_new_string(owner_uuid));
-
+	json_object_array_add(jarray, json_object_new_string(owner_uuid));
+	json_object_object_add(jobj, "configureWhitelist", jarray);
 	jobjstring = json_object_to_json_string(jobj);
 
 	memset(&json, 0, sizeof(json));
 	err = proto_ops->mknode(proto_sock, jobjstring, &json);
 
+	json_object_put(jarray);
 	json_object_put(jobj);
 
 	if (err < 0) {
@@ -1401,8 +1404,9 @@ static int8_t msg_data(int sock, int proto_sock,
 	hal_log_info("JSON: %s", jobjstr);
 
 	memset(&json, 0, sizeof(json));
-	err = proto_ops->data(proto_sock, trust->uuid, trust->token,
-							jobjstr, &json);
+	//err = proto_ops->data(proto_sock, trust->uuid, trust->token,
+	//						jobjstr, &json);
+	err =proto_ops->message(proto_sock, trust->uuid, NULL, jobjstr);
 	if (json.data)
 		free(json.data);
 

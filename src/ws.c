@@ -275,6 +275,7 @@ static int ws_mknode(int sock, const char *device_json, json_raw_t *json)
 	 * buffer is offset by LWS_PRE, this means there are only MAX_PAYLOAD
 	 * bytes left to write.
 	 */
+	hal_log_info("------ %s", jobjstring);
 	psd->len = snprintf((char *) psd->buffer + LWS_PRE, MAX_PAYLOAD,
 					"%d%s", OPERATION_PREFIX, jobjstring);
 	/*
@@ -390,8 +391,7 @@ static int ws_signin(int sock, const char *uuid, const char *token,
 	json_object_object_add(jobj, "uuid", json_object_new_string(uuid));
 	json_object_object_add(jobj, "token", json_object_new_string(token));
 
-	json_object_array_add(jarray,
-	json_object_new_string("identity"));
+	json_object_array_add(jarray, json_object_new_string("identity"));
 	json_object_array_add(jarray, jobj);
 
 	jobjstring = json_object_to_json_string(jarray);
@@ -575,6 +575,58 @@ static int ws_data(int sock, const char *uuid, const char *token,
 	}
 	psd->len = snprintf((char *)&psd->buffer + LWS_PRE, MAX_PAYLOAD, "%d%s",
 						OPERATION_PREFIX, jobjstr);
+	lws_callback_on_writable(entry->data);
+	err = 0;
+	hal_log_info("#######data: %s", jobjstr);
+	while (!got_response && !connection_error)
+		lws_service(context, SERVICE_TIMEOUT);
+
+done:
+	got_response = FALSE;
+	connection_error = FALSE;
+
+	json_object_put(jmsg);
+
+	return err;
+}
+
+static int ws_message(int sock, const char *to_uuid, const char *topic, const char *jreq)
+{
+	int err;
+	struct json_object *jobj, *jmsg, *jobj1;
+	const char *jobjstr;
+	GSList *entry;
+
+	jobj1 = json_object_new_object();
+	jobj = json_tokener_parse(jreq);
+	if (jobj == NULL)
+		return -EINVAL;
+
+	jmsg = json_object_new_array();
+	json_object_array_add(jmsg, json_object_new_string("message"));
+	json_object_object_add(jobj1, "devices",
+					json_object_new_string("\"*\""));
+	json_object_object_add(jobj1, "uuid",
+					json_object_new_string(to_uuid));
+	if (topic)
+		json_object_object_add(jobj1, "topic",
+						json_object_new_string(topic));
+
+	json_object_object_add(jobj1, "data", jobj);
+	json_object_array_add(jmsg, jobj1);
+	jobjstr = json_object_to_json_string(jmsg);
+
+	psd = g_hash_table_lookup(wstable, GINT_TO_POINTER(sock));
+
+	entry = g_slist_nth(wsis, psd->index);
+	if (entry->data == NULL) {
+		hal_log_error("Not found");
+		err = -EBADF;
+		goto done;
+	}
+	psd->len = snprintf((char *)&psd->buffer + LWS_PRE, MAX_PAYLOAD, "%d%s",
+						OPERATION_PREFIX, jobjstr);
+	hal_log_info("#######: %s", jobjstr);
 	lws_callback_on_writable(entry->data);
 	err = 0;
 
@@ -961,5 +1013,6 @@ struct proto_ops proto_ws = {
 	.data = ws_data,
 	.fetch = ws_device,
 	.async = proto_register_watch,
-	.setdata = ws_update
+	.setdata = ws_update,
+	.message = ws_message
 };
